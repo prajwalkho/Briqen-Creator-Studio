@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { sql } from 'drizzle-orm';
 import { promisify } from 'util';
 import { db } from '../../db/index.ts';
-import { hasGeminiApiKey } from '../providers/aiClient.ts';
+import { loadAIConfig } from '../ai/config.ts';
 
 const execFileAsync = promisify(execFile);
 export const healthRouter = Router();
@@ -26,6 +26,7 @@ healthRouter.get('/', async (_req, res) => {
     ffmpegHealthy = false;
   }
 
+  const aiCfg = loadAIConfig();
   const healthy = dbHealthy && ffmpegHealthy;
   res.status(healthy ? 200 : 503).json({
     success: healthy,
@@ -34,7 +35,14 @@ healthRouter.get('/', async (_req, res) => {
     dependencies: {
       database: dbHealthy ? 'ok' : 'unavailable',
       ffmpeg: ffmpegHealthy ? 'ok' : 'unavailable',
-      geminiConfigured: hasGeminiApiKey(),
+      geminiConfigured: aiCfg.geminiConfigured,
+      openaiConfigured: aiCfg.openaiConfigured,
+      openaiVideoConfigured: aiCfg.openaiVideoConfigured,
+      aiProviders: {
+        llm: aiCfg.llmProvider,
+        image: aiCfg.imageProvider,
+        video: aiCfg.videoProvider,
+      },
     },
   });
 });

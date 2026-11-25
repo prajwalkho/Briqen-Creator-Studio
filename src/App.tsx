@@ -1,34 +1,40 @@
 import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import { LoginPage } from './pages/LoginPage';
+import { ProtectedRoute, PublicOnlyRoute } from './components/ProtectedRoute';
+import { AuthProvider } from './context/AuthContext';
 import { DashboardPage } from './pages/DashboardPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { LegalPage } from './pages/LegalPage';
+import { LoginPage } from './pages/LoginPage';
 import { ProjectWorkspacePage } from './pages/ProjectWorkspacePage';
-import { StudioLabPage } from './pages/StudioLabPage';
+import { RegisterPage } from './pages/RegisterPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { StudioLabPage } from './pages/StudioLabPage';
+import { VerifyEmailPage } from './pages/VerifyEmailPage';
 
 const AppRoutes: React.FC = () => {
-  const { firebaseUser, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-[#0B0D12] text-slate-600 dark:text-slate-400 text-sm">
-        Loading Briqen Creator Studio...
-      </div>
-    );
-  }
-
-  if (!firebaseUser) {
-    return <LoginPage />;
-  }
-
   return (
     <Routes>
-      <Route path="/" element={<DashboardPage mode="dashboard" />} />
-      <Route path="/projects" element={<DashboardPage mode="projects" />} />
-      <Route path="/projects/:projectId" element={<ProjectWorkspacePage />} />
-      <Route path="/studio-lab" element={<StudioLabPage />} />
-      <Route path="/settings" element={<SettingsPage />} />
+      <Route element={<PublicOnlyRoute />}>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+      </Route>
+
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route path="/terms" element={<LegalPage type="terms" />} />
+      <Route path="/privacy" element={<LegalPage type="privacy" />} />
+
+      <Route element={<ProtectedRoute />}>
+        <Route path="/" element={<DashboardPage mode="dashboard" />} />
+        <Route path="/projects" element={<DashboardPage mode="projects" />} />
+        <Route path="/projects/:projectId" element={<ProjectWorkspacePage />} />
+        <Route path="/studio-lab" element={<StudioLabPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+      </Route>
+
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

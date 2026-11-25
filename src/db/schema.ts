@@ -11,18 +11,145 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
-// 1. Users (linked to Firebase Auth UID)
-export const users = pgTable('users', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  uid: text('uid').notNull().unique(),
-  email: text('email').notNull(),
-  displayName: text('display_name'),
-  avatarUrl: text('avatar_url'),
-  creditsBalance: integer('credits_balance').default(1000).notNull(),
-  role: text('role').default('creator').notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+// 1. Users (supports both password auth and Firebase Google OAuth)
+export const users = pgTable(
+  'users',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    uid: text('uid').notNull().unique(),
+    fullName: text('full_name'),
+    username: text('username'),
+    email: text('email').notNull(),
+    pendingEmail: text('pending_email'),
+    passwordHash: text('password_hash'),
+    phoneNumber: text('phone_number'),
+    bio: text('bio'),
+    profileImageKey: text('profile_image_key'),
+    country: text('country'),
+    state: text('state'),
+    city: text('city'),
+    website: text('website'),
+    linkedinUrl: text('linkedin_url'),
+    githubUrl: text('github_url'),
+    isActive: boolean('is_active').default(true).notNull(),
+    isVerified: boolean('is_verified').default(false).notNull(),
+    displayName: text('display_name'),
+    avatarUrl: text('avatar_url'),
+    creditsBalance: integer('credits_balance').default(1000).notNull(),
+    role: text('role').default('creator').notNull(),
+    tokenVersion: integer('token_version').default(1).notNull(),
+    passwordChangedAt: timestamp('password_changed_at'),
+    lastLoginAt: timestamp('last_login_at'),
+    deletionRequestedAt: timestamp('deletion_requested_at'),
+    deletionScheduledFor: timestamp('deletion_scheduled_for'),
+    deletionReason: text('deletion_reason'),
+    deletedAt: timestamp('deleted_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('users_email_idx').on(table.email),
+    uniqueIndex('users_username_uidx').on(table.username),
+  ]
+);
+
+// 1b. Refresh Tokens (hashed opaque tokens with rotation & reuse detection)
+export const refreshTokens = pgTable(
+  'refresh_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    familyId: uuid('family_id').notNull(),
+    replacedByTokenId: uuid('replaced_by_token_id'),
+    rememberMe: boolean('remember_me').default(false).notNull(),
+    userAgent: text('user_agent'),
+    ipAddress: text('ip_address'),
+    expiresAt: timestamp('expires_at').notNull(),
+    revokedAt: timestamp('revoked_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('refresh_tokens_user_idx').on(table.userId),
+    index('refresh_tokens_family_idx').on(table.familyId),
+  ]
+);
+
+// 1c. Password Reset Tokens (single-use hashed tokens with short expiration)
+export const passwordResetTokens = pgTable(
+  'password_reset_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at').notNull(),
+    usedAt: timestamp('used_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [index('password_reset_tokens_user_idx').on(table.userId)]
+);
+
+// 1d. Email Verification Tokens (supports both initial verification and email change confirmation)
+export const emailVerificationTokens = pgTable(
+  'email_verification_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    pendingEmail: text('pending_email'),
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at').notNull(),
+    usedAt: timestamp('used_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [index('email_verification_tokens_user_idx').on(table.userId)]
+);
+
+// 1e. User Preferences
+export const userPreferences = pgTable(
+  'user_preferences',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull()
+      .unique(),
+    theme: text('theme').default('dark').notNull(), // light | dark | system
+    language: text('language').default('en').notNull(),
+    timezone: text('timezone').default('UTC').notNull(),
+    defaultAspectRatio: text('default_aspect_ratio').default('16:9').notNull(), // 16:9 | 9:16 | 1:1 | 4:3
+    defaultExportQuality: text('default_export_quality').default('standard').notNull(), // standard | low
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [index('user_preferences_user_idx').on(table.userId)]
+);
+
+// 1f. Notification Preferences
+export const notificationPreferences = pgTable(
+  'notification_preferences',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull()
+      .unique(),
+    emailNotifications: boolean('email_notifications').default(true).notNull(),
+    projectUpdates: boolean('project_updates').default(true).notNull(),
+    generationCompleted: boolean('generation_completed').default(true).notNull(),
+    generationFailed: boolean('generation_failed').default(true).notNull(),
+    productAnnouncements: boolean('product_announcements').default(true).notNull(),
+    marketingEmails: boolean('marketing_emails').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [index('notification_preferences_user_idx').on(table.userId)]
+);
 
 // 2. Projects
 export const projects = pgTable(
@@ -65,10 +192,20 @@ export const scriptRevisions = pgTable(
     language: text('language').default('English').notNull(),
     toneOfVoice: text('tone_of_voice').default('Energetic').notNull(),
     marketingObjective: text('marketing_objective').default('Brand Awareness').notNull(),
+    topic: text('topic').default('').notNull(),
+    contentType: text('content_type').default('YouTube').notNull(),
     content: text('content').notNull(),
     aiModelUsed: text('ai_model_used').default('manual').notNull(),
     aiNotes: text('ai_notes'),
     groundingSources: jsonb('grounding_sources').$type<Array<{ title: string; uri: string }>>(),
+    usageJson: jsonb('usage_json').$type<{
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+      estimatedCostUsd?: number;
+      provider?: string;
+      isMock?: boolean;
+    }>(),
     createdByUid: text('created_by_uid').notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
@@ -154,11 +291,13 @@ export const generationActions = pgTable(
       .references(() => users.id, { onDelete: 'cascade' })
       .notNull(),
     idempotencyKey: text('idempotency_key').notNull().unique(),
+    actionType: text('action_type').default('media_generation').notNull(), // image_generation | video_generation | tts_generation | music_generation
     mediaType: text('media_type').notNull(), // image | video | audio_tts | audio_music
-    provider: text('provider').notNull(), // gemini | mock
+    provider: text('provider').notNull(), // gemini | openai | mock
     model: text('model').notNull(),
     prompt: text('prompt').notNull(),
     configJson: jsonb('config_json').$type<Record<string, unknown>>(),
+    status: text('status').default('queued').notNull(), // queued | processing | completed | failed | cancelled
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table) => [index('gen_actions_project_idx').on(table.projectId)]
@@ -180,11 +319,15 @@ export const generationJobs = pgTable(
     userId: uuid('user_id')
       .references(() => users.id, { onDelete: 'cascade' })
       .notNull(),
+    provider: text('provider').default('mock').notNull(),
+    providerJobId: text('provider_job_id'),
     status: text('status').default('queued').notNull(), // queued | processing | succeeded | failed | retrying | cancelled | timed_out
+    progress: integer('progress').default(0).notNull(),
     acceptedAttemptId: uuid('accepted_attempt_id'),
     resultAssetId: uuid('result_asset_id'),
     errorMessage: text('error_message'),
     attemptCount: integer('attempt_count').default(0).notNull(),
+    startedAt: timestamp('started_at'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
     completedAt: timestamp('completed_at'),
@@ -210,7 +353,9 @@ export const generationAttempts = pgTable(
     status: text('status').default('queued').notNull(), // queued | processing | succeeded | failed | timed_out | stale_ignored
     providerRequestId: text('provider_request_id'),
     errorMessage: text('error_message'),
+    usageJson: jsonb('usage_json').$type<Record<string, unknown>>(),
     durationMs: integer('duration_ms'),
+    startedAt: timestamp('started_at'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     finishedAt: timestamp('finished_at'),
   },
@@ -306,10 +451,41 @@ export const billingTransactions = pgTable(
 );
 
 // Relations
-export const usersRelations = relations(users, ({ many }) => ({
+export const usersRelations = relations(users, ({ one, many }) => ({
   projects: many(projects),
   assets: many(assets),
   billingTransactions: many(billingTransactions),
+  refreshTokens: many(refreshTokens),
+  passwordResetTokens: many(passwordResetTokens),
+  emailVerificationTokens: many(emailVerificationTokens),
+  preferences: one(userPreferences, {
+    fields: [users.id],
+    references: [userPreferences.userId],
+  }),
+  notificationPreferences: one(notificationPreferences, {
+    fields: [users.id],
+    references: [notificationPreferences.userId],
+  }),
+}));
+
+export const userPreferencesRelations = relations(userPreferences, ({ one }) => ({
+  user: one(users, { fields: [userPreferences.userId], references: [users.id] }),
+}));
+
+export const notificationPreferencesRelations = relations(notificationPreferences, ({ one }) => ({
+  user: one(users, { fields: [notificationPreferences.userId], references: [users.id] }),
+}));
+
+export const refreshTokensRelations = relations(refreshTokens, ({ one }) => ({
+  user: one(users, { fields: [refreshTokens.userId], references: [users.id] }),
+}));
+
+export const passwordResetTokensRelations = relations(passwordResetTokens, ({ one }) => ({
+  user: one(users, { fields: [passwordResetTokens.userId], references: [users.id] }),
+}));
+
+export const emailVerificationTokensRelations = relations(emailVerificationTokens, ({ one }) => ({
+  user: one(users, { fields: [emailVerificationTokens.userId], references: [users.id] }),
 }));
 
 export const projectsRelations = relations(projects, ({ one, many }) => ({

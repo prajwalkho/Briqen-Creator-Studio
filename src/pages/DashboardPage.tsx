@@ -1,9 +1,20 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { z } from 'zod';
-import { ArrowUpRight, Film, Plus, Search, Trash2, X } from 'lucide-react';
+import {
+  ArrowRight,
+  ArrowUpRight,
+  Film,
+  LayoutTemplate,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { StudioLayout } from '../layouts/StudioLayout';
 import { apiRequest } from '../services/api';
+import { PROJECT_TEMPLATES, ProjectTemplate } from '../data/projectTemplates';
 import { DashboardStats, Project } from '../types/studio';
 
 const createProjectSchema = z.object({
@@ -25,6 +36,7 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
   mode = 'dashboard',
 }) => {
   const navigate = useNavigate();
+  const { preferences } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [stats, setStats] = useState<DashboardStats>({
     totalProjects: 0,
@@ -40,14 +52,44 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
   const [sortBy, setSortBy] = useState('updated_desc');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<ProjectTemplate | null>(null);
   const [formTitle, setFormTitle] = useState('');
   const [formDesc, setFormDesc] = useState('');
   const [formBrand, setFormBrand] = useState('');
   const [formAudience, setFormAudience] = useState('');
   const [formPlatform, setFormPlatform] = useState<'YouTube' | 'Instagram' | 'TikTok' | 'LinkedIn' | 'Facebook' | 'Web'>('YouTube');
-  const [formRatio, setFormRatio] = useState<'16:9' | '9:16' | '1:1' | '4:3'>('16:9');
+  const [formRatio, setFormRatio] = useState<'16:9' | '9:16' | '1:1' | '4:3'>(
+    preferences?.defaultAspectRatio || '16:9'
+  );
+  const [formDraftScript, setFormDraftScript] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const openBlankModal = () => {
+    setSelectedTemplate(null);
+    setFormTitle('');
+    setFormDesc('');
+    setFormBrand('');
+    setFormAudience('');
+    setFormPlatform('YouTube');
+    setFormRatio(preferences?.defaultAspectRatio || '16:9');
+    setFormDraftScript('');
+    setFormError(null);
+    setModalOpen(true);
+  };
+
+  const applyTemplateToForm = (tpl: ProjectTemplate) => {
+    setSelectedTemplate(tpl);
+    setFormTitle(tpl.defaultTitle);
+    setFormDesc(tpl.summary);
+    setFormBrand(tpl.brandName);
+    setFormAudience(tpl.targetAudience);
+    setFormPlatform(tpl.platform);
+    setFormRatio(tpl.aspectRatio);
+    setFormDraftScript(tpl.scriptContent);
+    setFormError(null);
+    setModalOpen(true);
+  };
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
@@ -95,15 +137,37 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
 
     setSubmitting(true);
     try {
+      const payload: Record<string, unknown> = {
+        ...parsed.data,
+        ...(selectedTemplate ? { thumbnailUrl: selectedTemplate.thumbnailUrl } : {}),
+        ...(formDraftScript.trim()
+          ? {
+              initialScript: {
+                title: `${parsed.data.title} Script`,
+                targetDurationSec: selectedTemplate?.targetDurationSec || 30,
+                language: 'English',
+                toneOfVoice: selectedTemplate?.toneOfVoice || 'Confident & Modern',
+                marketingObjective: selectedTemplate?.marketingObjective || 'Product Launch',
+                content: formDraftScript.trim(),
+                aiNotes: selectedTemplate
+                  ? `Initialized from ${selectedTemplate.name} template`
+                  : 'Initial draft script',
+              },
+            }
+          : {}),
+      };
+
       const res = await apiRequest<{ data: Project }>('/projects', {
         method: 'POST',
-        body: JSON.stringify(parsed.data),
+        body: JSON.stringify(payload),
       });
       setModalOpen(false);
+      setSelectedTemplate(null);
       setFormTitle('');
       setFormDesc('');
       setFormBrand('');
       setFormAudience('');
+      setFormDraftScript('');
       navigate(`/projects/${res.data.id}`);
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : 'Failed to create project.');
@@ -128,7 +192,7 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
       primaryAction={
         <button
           type="button"
-          onClick={() => setModalOpen(true)}
+          onClick={openBlankModal}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
         >
           <Plus className="h-4 w-4" />
@@ -138,53 +202,110 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
     >
       <div className="space-y-8">
         {mode === 'dashboard' && (
-          <section className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-              <div>
-                <h2 className="font-display text-2xl font-bold tracking-tight text-balance">
-                  Production Overview
-                </h2>
-                <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-                  Manage scripts, scene storyboards, AI media jobs, and FFmpeg video renders.
-                </p>
+          <>
+            <section className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                <div>
+                  <h2 className="font-display text-2xl font-bold tracking-tight text-balance">
+                    Production Overview
+                  </h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                    Manage scripts, scene storyboards, AI media jobs, and FFmpeg video renders.
+                  </p>
+                </div>
               </div>
-            </div>
 
-            <div className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-slate-800/80 rounded-xl bg-white dark:bg-[#13161E] divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-slate-800/80">
-              <div className="p-5">
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  Total Projects
-                </p>
-                <p className="mt-2 font-mono text-2xl font-semibold tabular-nums">
-                  {stats.totalProjects}
-                </p>
+              <div className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-slate-800/80 rounded-xl bg-white dark:bg-[#13161E] divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-slate-800/80">
+                <div className="p-5">
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Total Projects
+                  </p>
+                  <p className="mt-2 font-mono text-2xl font-semibold tabular-nums">
+                    {stats.totalProjects}
+                  </p>
+                </div>
+                <div className="p-5">
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Completed Exports
+                  </p>
+                  <p className="mt-2 font-mono text-2xl font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                    {stats.completedProjects}
+                  </p>
+                </div>
+                <div className="p-5">
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Processing
+                  </p>
+                  <p className="mt-2 font-mono text-2xl font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
+                    {stats.processingProjects}
+                  </p>
+                </div>
+                <div className="p-5">
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Failed Jobs
+                  </p>
+                  <p className="mt-2 font-mono text-2xl font-semibold text-red-600 dark:text-red-400 tabular-nums">
+                    {stats.failedJobs}
+                  </p>
+                </div>
               </div>
-              <div className="p-5">
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  Completed Exports
-                </p>
-                <p className="mt-2 font-mono text-2xl font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
-                  {stats.completedProjects}
-                </p>
+            </section>
+
+            {/* Project Templates Gallery */}
+            <section className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <LayoutTemplate className="h-4 w-4 text-amber-500" />
+                    <h3 className="font-display text-base font-semibold tracking-tight">
+                      Project Templates
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                    Pick a pre-built campaign structure to auto-initialize project settings and a ready-to-edit draft script.
+                  </p>
+                </div>
               </div>
-              <div className="p-5">
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  Processing
-                </p>
-                <p className="mt-2 font-mono text-2xl font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
-                  {stats.processingProjects}
-                </p>
+
+              <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                {PROJECT_TEMPLATES.map((tpl) => (
+                  <article
+                    key={tpl.id}
+                    className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#13161E] p-4 flex flex-col justify-between gap-4 hover:border-amber-500/50 transition-colors"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500 dark:text-slate-400 tabular-nums">
+                        <span>{tpl.category}</span>
+                        <span>
+                          {tpl.platform} · {tpl.aspectRatio} · {tpl.targetDurationSec}s
+                        </span>
+                      </div>
+                      <h4 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {tpl.name}
+                      </h4>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2 leading-relaxed">
+                        {tpl.summary}
+                      </p>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-100 dark:border-slate-800/70 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                        {tpl.toneOfVoice}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => applyTemplateToForm(tpl)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 text-xs font-semibold hover:bg-amber-500 hover:text-slate-950 dark:hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0"
+                      >
+                        <span>Use Template</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </article>
+                ))}
               </div>
-              <div className="p-5">
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  Failed Jobs
-                </p>
-                <p className="mt-2 font-mono text-2xl font-semibold text-red-600 dark:text-red-400 tabular-nums">
-                  {stats.failedJobs}
-                </p>
-              </div>
-            </div>
-          </section>
+            </section>
+          </>
         )}
 
         <section className="space-y-5">
@@ -253,12 +374,12 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
               <div className="space-y-1">
                 <h3 className="font-display text-lg font-semibold">No video projects yet</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                  Create your first campaign project to draft an AI script, extract scenes, generate media, and render a draft video.
+                  Choose a Project Template above or start from scratch to draft an AI script, extract scenes, and render a draft video.
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setModalOpen(true)}
+                onClick={openBlankModal}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors"
               >
                 <Plus className="h-4 w-4" />
@@ -349,10 +470,17 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
       </div>
 
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
-          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#13161E] p-6 space-y-5">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs overflow-y-auto">
+          <div className="w-full max-w-2xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#13161E] p-6 space-y-5 my-8">
             <div className="flex items-center justify-between">
-              <h3 className="font-display text-lg font-semibold">New Video Project</h3>
+              <div>
+                <h3 className="font-display text-lg font-semibold">
+                  {selectedTemplate ? `New Project · ${selectedTemplate.name}` : 'New Video Project'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Start from scratch or switch between marketing templates below.
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
@@ -361,6 +489,37 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
               >
                 <X className="h-4 w-4" />
               </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 p-1.5 rounded-lg bg-slate-100 dark:bg-[#0B0D12] border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedTemplate(null);
+                  setFormDraftScript('');
+                }}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                  selectedTemplate === null
+                    ? 'bg-white dark:bg-[#1E2330] text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                }`}
+              >
+                Blank Project
+              </button>
+              {PROJECT_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => applyTemplateToForm(tpl)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                    selectedTemplate?.id === tpl.id
+                      ? 'bg-amber-500 text-slate-950 font-semibold'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                  }`}
+                >
+                  {tpl.name}
+                </button>
+              ))}
             </div>
 
             <form onSubmit={handleCreateProject} className="space-y-4">
@@ -451,13 +610,32 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
                   Description
                 </label>
                 <textarea
-                  rows={3}
+                  rows={2}
                   value={formDesc}
                   onChange={(e) => setFormDesc(e.target.value)}
                   placeholder="Campaign goals, product highlights, or visual direction..."
                   className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-sm focus:outline-none focus:border-amber-500"
                 />
               </div>
+
+              {formDraftScript && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
+                      Initial Draft Script (v1)
+                    </label>
+                    <span className="text-[11px] font-mono text-slate-500">
+                      Editable before launch
+                    </span>
+                  </div>
+                  <textarea
+                    rows={6}
+                    value={formDraftScript}
+                    onChange={(e) => setFormDraftScript(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs leading-relaxed font-sans focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-2">
                 <button
@@ -470,9 +648,13 @@ export const DashboardPage: React.FC<{ mode?: 'dashboard' | 'projects' }> = ({
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors disabled:opacity-60"
+                  className="px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors disabled:opacity-60 whitespace-nowrap"
                 >
-                  {submitting ? 'Creating...' : 'Create Project'}
+                  {submitting
+                    ? 'Initializing...'
+                    : selectedTemplate
+                      ? 'Create from Template'
+                      : 'Create Project'}
                 </button>
               </div>
             </form>

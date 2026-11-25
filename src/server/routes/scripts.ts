@@ -2,13 +2,12 @@ import { Router } from 'express';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/index.ts';
-import { projects, scenes, scriptRevisions } from '../../db/schema.ts';
+import { projects, scriptRevisions } from '../../db/schema.ts';
 import { AuthRequest, requireAuth } from '../../middleware/auth.ts';
-import {
-  extractScenesWithAI,
-  generateScriptWithAI,
-  reviseScriptWithAI,
-} from '../providers/scriptService.ts';
+import { AIProviderError } from '../ai/exceptions.ts';
+import { extractAndSaveScenes } from '../ai/services/sceneExtractionService.ts';
+import { generateAndSaveScriptRevision } from '../ai/services/scriptGenerationService.ts';
+import { improveAndSaveScriptRevision } from '../ai/services/scriptImprovementService.ts';
 
 export const scriptsRouter = Router();
 scriptsRouter.use(requireAuth);
@@ -39,6 +38,11 @@ const saveScriptSchema = z.object({
   language: z.string().trim().max(60).optional().default('English'),
   toneOfVoice: z.string().trim().max(80).optional().default('Energetic'),
   marketingObjective: z.string().trim().max(120).optional().default('Brand Awareness'),
+  topic: z.string().trim().max(300).optional().default(''),
+  contentType: z
+    .enum(['YouTube', 'advertisement', 'educational', 'promotional', 'social_media'])
+    .optional()
+    .default('YouTube'),
   content: z.string().trim().min(1),
   aiNotes: z.string().optional(),
 });
@@ -131,17 +135,23 @@ scriptsRouter.get('/scripts/:scriptId/revisions', async (req: AuthRequest, res) 
 });
 
 const generateScriptSchema = z.object({
+  topic: z.string().trim().max(300).optional().default(''),
   title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(2000).optional().default(''),
   brandName: z.string().trim().max(120).optional().default(''),
   targetAudience: z.string().trim().max(240).optional().default(''),
   platform: z.string().trim().max(60).optional().default('YouTube'),
-  targetDurationSec: z.number().int().min(5).max(300).optional().default(30),
+  contentType: z
+    .enum(['YouTube', 'advertisement', 'educational', 'promotional', 'social_media'])
+    .optional()
+    .default('YouTube'),
+  targetDurationSec: z.number().int().min(5).max(600).optional().default(30),
   language: z.string().trim().max(60).optional().default('English'),
   toneOfVoice: z.string().trim().max(80).optional().default('Energetic'),
   marketingObjective: z.string().trim().max(120).optional().default('Brand Awareness'),
   brief: z.string().trim().max(2000).optional(),
   useSearchGrounding: z.boolean().optional().default(false),
-  provider: z.enum(['gemini', 'mock']).optional().default('gemini'),
+  provider: z.enum(['gemini', 'openai', 'mock']).optional(),
 });
 
 scriptsRouter.post('/projects/:projectId/scripts/generate', async (req: AuthRequest, res) => {
@@ -154,46 +164,32 @@ scriptsRouter.post('/projects/:projectId/scripts/generate', async (req: AuthRequ
     const project = await ensureProjectOwner(req.params.projectId, req.dbUser!.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
-    const aiResult = await generateScriptWithAI(parsed.data);
-
-    const created = await db.transaction(async (tx) => {
-      const nextVer = await getNextVersionNumber(project.id);
-      const [rev] = await tx
-        .insert(scriptRevisions)
-        .values({
-          projectId: project.id,
-          versionNumber: nextVer,
-          title: parsed.data.title,
-          brandName: parsed.data.brandName,
-          targetAudience: parsed.data.targetAudience,
-          platform: parsed.data.platform,
-          targetDurationSec: parsed.data.targetDurationSec,
-          language: parsed.data.language,
-          toneOfVoice: parsed.data.toneOfVoice,
-          marketingObjective: parsed.data.marketingObjective,
-          content: aiResult.content,
-          aiModelUsed: aiResult.aiModelUsed,
-          aiNotes: aiResult.aiNotes,
-          groundingSources: aiResult.groundingSources,
-          createdByUid: req.dbUser!.uid,
-        })
-        .returning();
-
-      await tx
-        .update(projects)
-        .set({ activeScriptRevisionId: rev.id, updatedAt: new Date() })
-        .where(eq(projects.id, project.id));
-
-      return rev;
+    const result = await generateAndSaveScriptRevision({
+      projectId: project.id,
+      userUid: req.dbUser!.uid,
+      ...parsed.data,
     });
 
     res.status(201).json({
       success: true,
-      message: `Generated script revision v${created.versionNumber}`,
-      data: created,
+      message: `Generated script revision v${result.revision.versionNumber}`,
+      data: result.revision,
+      meta: {
+        provider: result.provider,
+        isMock: result.isMock,
+        usage: result.usage,
+      },
     });
   } catch (error: unknown) {
     console.error('Generate script error:', error);
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        provider: error.provider,
+        message: error.message,
+      });
+    }
     const msg = error instanceof Error ? error.message : 'Script generation failed.';
     res.status(502).json({ success: false, message: msg });
   }
@@ -204,15 +200,24 @@ const reviseScriptSchema = z.object({
   brandName: z.string().trim().max(120).optional().default(''),
   targetAudience: z.string().trim().max(240).optional().default(''),
   platform: z.string().trim().max(60).optional().default('YouTube'),
-  targetDurationSec: z.number().int().min(5).max(300).optional().default(30),
+  targetDurationSec: z.number().int().min(5).max(600).optional().default(30),
   language: z.string().trim().max(60).optional().default('English'),
   toneOfVoice: z.string().trim().max(80).optional().default('Energetic'),
   marketingObjective: z.string().trim().max(120).optional().default('Brand Awareness'),
   currentContent: z.string().trim().min(1),
-  action: z.enum(['rewrite', 'grammar', 'tone', 'expand', 'shorten', 'alternative']),
+  action: z.enum([
+    'rewrite',
+    'grammar',
+    'clarity',
+    'engaging',
+    'tone',
+    'expand',
+    'shorten',
+    'alternative',
+  ]),
   targetTone: z.string().trim().max(80).optional(),
-  instructions: z.string().trim().max(500).optional(),
-  provider: z.enum(['gemini', 'mock']).optional().default('gemini'),
+  instructions: z.string().trim().max(600).optional(),
+  provider: z.enum(['gemini', 'openai', 'mock']).optional(),
 });
 
 scriptsRouter.post('/projects/:projectId/scripts/revise', async (req: AuthRequest, res) => {
@@ -225,53 +230,32 @@ scriptsRouter.post('/projects/:projectId/scripts/revise', async (req: AuthReques
     const project = await ensureProjectOwner(req.params.projectId, req.dbUser!.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
-    const aiResult = await reviseScriptWithAI({
-      currentContent: parsed.data.currentContent,
-      action: parsed.data.action,
-      targetTone: parsed.data.targetTone,
-      instructions: parsed.data.instructions,
-      platform: parsed.data.platform,
-      language: parsed.data.language,
-      provider: parsed.data.provider,
-    });
-
-    const created = await db.transaction(async (tx) => {
-      const nextVer = await getNextVersionNumber(project.id);
-      const [rev] = await tx
-        .insert(scriptRevisions)
-        .values({
-          projectId: project.id,
-          versionNumber: nextVer,
-          title: parsed.data.title,
-          brandName: parsed.data.brandName,
-          targetAudience: parsed.data.targetAudience,
-          platform: parsed.data.platform,
-          targetDurationSec: parsed.data.targetDurationSec,
-          language: parsed.data.language,
-          toneOfVoice: parsed.data.targetTone || parsed.data.toneOfVoice,
-          marketingObjective: parsed.data.marketingObjective,
-          content: aiResult.content,
-          aiModelUsed: aiResult.aiModelUsed,
-          aiNotes: aiResult.aiNotes,
-          createdByUid: req.dbUser!.uid,
-        })
-        .returning();
-
-      await tx
-        .update(projects)
-        .set({ activeScriptRevisionId: rev.id, updatedAt: new Date() })
-        .where(eq(projects.id, project.id));
-
-      return rev;
+    const result = await improveAndSaveScriptRevision({
+      projectId: project.id,
+      userUid: req.dbUser!.uid,
+      ...parsed.data,
     });
 
     res.status(201).json({
       success: true,
-      message: `Created script revision v${created.versionNumber}`,
-      data: created,
+      message: `Created script revision v${result.revision.versionNumber}`,
+      data: result.revision,
+      meta: {
+        provider: result.provider,
+        isMock: result.isMock,
+        usage: result.usage,
+      },
     });
   } catch (error: unknown) {
     console.error('Revise script error:', error);
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        provider: error.provider,
+        message: error.message,
+      });
+    }
     const msg = error instanceof Error ? error.message : 'Script revision failed.';
     res.status(502).json({ success: false, message: msg });
   }
@@ -307,6 +291,8 @@ scriptsRouter.post('/projects/:projectId/scripts/:revisionId/restore', async (re
           language: oldRev.language,
           toneOfVoice: oldRev.toneOfVoice,
           marketingObjective: oldRev.marketingObjective,
+          topic: oldRev.topic,
+          contentType: oldRev.contentType,
           content: oldRev.content,
           aiModelUsed: 'restore',
           aiNotes: `Restored from immutable revision v${oldRev.versionNumber}`,
@@ -338,7 +324,7 @@ const extractScenesSchema = z.object({
   scriptRevisionId: z.string().uuid().optional(),
   content: z.string().trim().min(1),
   replaceExisting: z.boolean().optional().default(true),
-  provider: z.enum(['gemini', 'mock']).optional().default('gemini'),
+  provider: z.enum(['gemini', 'openai', 'mock']).optional(),
 });
 
 scriptsRouter.post('/projects/:projectId/scripts/extract-scenes', async (req: AuthRequest, res) => {
@@ -351,62 +337,38 @@ scriptsRouter.post('/projects/:projectId/scripts/extract-scenes', async (req: Au
     const project = await ensureProjectOwner(req.params.projectId, req.dbUser!.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found.' });
 
-    const { scenes: extracted, modelUsed } = await extractScenesWithAI(
-      parsed.data.content,
-      project.aspectRatio,
-      project.platform,
-      parsed.data.provider
-    );
-
-    const savedScenes = await db.transaction(async (tx) => {
-      let startOrder = 0;
-      if (parsed.data.replaceExisting) {
-        await tx.delete(scenes).where(eq(scenes.projectId, project.id));
-      } else {
-        const existingMax = await tx
-          .select({ maxOrd: sql<number>`coalesce(max(${scenes.sceneOrder}), -1)::int` })
-          .from(scenes)
-          .where(eq(scenes.projectId, project.id));
-        startOrder = (existingMax[0]?.maxOrd ?? -1) + 1;
-      }
-
-      const inserted = [];
-      for (let i = 0; i < extracted.length; i++) {
-        const item = extracted[i];
-        const [row] = await tx
-          .insert(scenes)
-          .values({
-            projectId: project.id,
-            scriptRevisionId: parsed.data.scriptRevisionId ?? project.activeScriptRevisionId ?? null,
-            sceneOrder: startOrder + i,
-            title: item.title,
-            narration: item.narration,
-            visualDescription: item.visualDescription,
-            imagePrompt: item.imagePrompt,
-            videoPrompt: item.videoPrompt,
-            durationSec: item.durationSec,
-            transition: item.transition,
-            mediaPreference: item.mediaPreference,
-          })
-          .returning();
-        inserted.push(row);
-      }
-
-      await tx
-        .update(projects)
-        .set({ updatedAt: new Date() })
-        .where(eq(projects.id, project.id));
-
-      return inserted;
+    const result = await extractAndSaveScenes({
+      projectId: project.id,
+      aspectRatio: project.aspectRatio,
+      platform: project.platform,
+      activeScriptRevisionId: project.activeScriptRevisionId,
+      scriptRevisionId: parsed.data.scriptRevisionId,
+      content: parsed.data.content,
+      replaceExisting: parsed.data.replaceExisting,
+      provider: parsed.data.provider,
     });
 
     res.status(201).json({
       success: true,
-      message: `Extracted ${savedScenes.length} scenes using ${modelUsed}`,
-      data: savedScenes,
+      message: `Extracted ${result.scenes.length} scenes using ${result.modelUsed}`,
+      data: result.scenes,
+      meta: {
+        provider: result.provider,
+        modelUsed: result.modelUsed,
+        isMock: result.isMock,
+        usage: result.usage,
+      },
     });
   } catch (error: unknown) {
     console.error('Extract scenes error:', error);
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        provider: error.provider,
+        message: error.message,
+      });
+    }
     const msg = error instanceof Error ? error.message : 'Failed to extract scenes.';
     res.status(502).json({ success: false, message: msg });
   }

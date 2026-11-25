@@ -2,19 +2,12 @@ import { Router } from 'express';
 import { and, asc, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../../db/index.ts';
-import { billingTransactions, generationJobs, projects } from '../../db/schema.ts';
+import { billingTransactions, generationJobs, projects, scriptRevisions } from '../../db/schema.ts';
 import { AuthRequest, requireAuth } from '../../middleware/auth.ts';
 
 export const projectsRouter = Router();
 
 projectsRouter.use(requireAuth);
-
-projectsRouter.get('/auth/me', (req: AuthRequest, res) => {
-  res.json({
-    success: true,
-    data: req.dbUser,
-  });
-});
 
 projectsRouter.get('/billing/ledger', async (req: AuthRequest, res) => {
   try {
@@ -38,6 +31,16 @@ projectsRouter.get('/billing/ledger', async (req: AuthRequest, res) => {
   }
 });
 
+const initialScriptSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  targetDurationSec: z.number().int().min(5).max(300).optional().default(30),
+  language: z.string().trim().max(60).optional().default('English'),
+  toneOfVoice: z.string().trim().max(80).optional().default('Energetic'),
+  marketingObjective: z.string().trim().max(120).optional().default('Brand Awareness'),
+  content: z.string().trim().min(1).max(20000),
+  aiNotes: z.string().trim().max(300).optional(),
+});
+
 const createProjectSchema = z.object({
   title: z.string().trim().min(1).max(160),
   description: z.string().trim().max(1000).optional().default(''),
@@ -45,9 +48,19 @@ const createProjectSchema = z.object({
   targetAudience: z.string().trim().max(240).optional().default(''),
   platform: z.enum(['YouTube', 'Instagram', 'TikTok', 'LinkedIn', 'Facebook', 'Web']).optional().default('YouTube'),
   aspectRatio: z.enum(['16:9', '9:16', '1:1', '4:3']).optional().default('16:9'),
+  thumbnailUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .refine(
+      (val) => val.startsWith('/src/assets/') || val.startsWith('https://'),
+      'Invalid thumbnail URL.'
+    )
+    .optional(),
+  initialScript: initialScriptSchema.optional(),
 });
 
-const updateProjectSchema = createProjectSchema.partial().extend({
+const updateProjectSchema = createProjectSchema.omit({ initialScript: true }).partial().extend({
   status: z.enum(['draft', 'processing', 'completed', 'failed']).optional(),
   selectedMusicAssetId: z.string().uuid().nullable().optional(),
 });
@@ -63,13 +76,49 @@ projectsRouter.post('/projects', async (req: AuthRequest, res) => {
   }
 
   try {
-    const [created] = await db
-      .insert(projects)
-      .values({
-        userId: req.dbUser!.id,
-        ...parsed.data,
-      })
-      .returning();
+    const { initialScript, ...projectFields } = parsed.data;
+
+    const created = await db.transaction(async (tx) => {
+      const [proj] = await tx
+        .insert(projects)
+        .values({
+          userId: req.dbUser!.id,
+          ...projectFields,
+        })
+        .returning();
+
+      if (initialScript) {
+        const [rev] = await tx
+          .insert(scriptRevisions)
+          .values({
+            projectId: proj.id,
+            versionNumber: 1,
+            title: initialScript.title,
+            brandName: projectFields.brandName,
+            targetAudience: projectFields.targetAudience,
+            platform: projectFields.platform,
+            targetDurationSec: initialScript.targetDurationSec,
+            language: initialScript.language,
+            toneOfVoice: initialScript.toneOfVoice,
+            marketingObjective: initialScript.marketingObjective,
+            content: initialScript.content,
+            aiModelUsed: 'template',
+            aiNotes: initialScript.aiNotes || 'Initialized from project template',
+            createdByUid: req.dbUser!.uid,
+          })
+          .returning();
+
+        const [updatedProj] = await tx
+          .update(projects)
+          .set({ activeScriptRevisionId: rev.id, updatedAt: new Date() })
+          .where(eq(projects.id, proj.id))
+          .returning();
+
+        return updatedProj;
+      }
+
+      return proj;
+    });
 
     res.status(201).json({
       success: true,

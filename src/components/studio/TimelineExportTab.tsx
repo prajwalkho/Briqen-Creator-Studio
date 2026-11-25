@@ -24,6 +24,7 @@ import {
   Square,
   Trash2,
 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { apiRequest } from '../../services/api';
 import { Asset, ExportRecord, Project, Scene } from '../../types/studio';
 
@@ -157,15 +158,25 @@ export const TimelineExportTab: React.FC<TimelineExportTabProps> = ({
   onScenesReordered,
   onRefreshAll,
 }) => {
+  const { preferences } = useAuth();
   const sensors = useSensors(useSensor(PointerSensor));
   const [selectedMusicId, setSelectedMusicId] = useState<string>(
     project.selectedMusicAssetId || ''
   );
   const [exportTitle, setExportTitle] = useState(`${project.title} Draft`);
+  const [exportQuality, setExportQuality] = useState<'standard' | 'low'>(
+    preferences?.defaultExportQuality || 'standard'
+  );
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
+
+  useEffect(() => {
+    if (preferences?.defaultExportQuality) {
+      setExportQuality(preferences.defaultExportQuality);
+    }
+  }, [preferences?.defaultExportQuality]);
 
   const musicAssets = assets.filter((a) => a.assetType === 'audio_music');
   const totalDuration = scenes.reduce((sum, s) => sum + (s.durationSec || 5), 0);
@@ -272,6 +283,7 @@ export const TimelineExportTab: React.FC<TimelineExportTabProps> = ({
         body: JSON.stringify({
           title: exportTitle,
           musicAssetId: selectedMusicId || null,
+          quality: exportQuality,
         }),
       });
       await onRefreshAll();
@@ -417,6 +429,20 @@ export const TimelineExportTab: React.FC<TimelineExportTabProps> = ({
 
               <div>
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
+                  Export Quality Preset
+                </label>
+                <select
+                  value={exportQuality}
+                  onChange={(e) => setExportQuality(e.target.value as 'standard' | 'low')}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-sm"
+                >
+                  <option value="standard">Standard HD (720p)</option>
+                  <option value="low">Quick Draft (360p)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
                   Background Music Track (Optional)
                 </label>
                 <select
@@ -482,10 +508,10 @@ export const TimelineExportTab: React.FC<TimelineExportTabProps> = ({
                     key={exp.id}
                     className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs space-y-1.5"
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="font-medium truncate">{exp.title}</span>
-                      <span className="font-mono capitalize text-[11px] tabular-nums">
-                        {exp.status} · {exp.job?.progressPct ?? 0}%
+                      <span className="font-mono capitalize text-[11px] tabular-nums shrink-0 text-slate-500 dark:text-slate-400">
+                        {exp.resolution} · {exp.status} · {exp.job?.progressPct ?? 0}%
                       </span>
                     </div>
                     {exp.job && exp.status !== 'succeeded' && (

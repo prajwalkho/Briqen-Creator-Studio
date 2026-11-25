@@ -112,3 +112,32 @@ test('MockMediaProvider synthesizes real PNG, MP4, and WAV files via FFmpeg', as
   assert.equal(tts.mimeType, 'audio/wav');
   assert.ok(tts.buffer.byteLength > 1000);
 });
+
+import { computeSideBySideDiff } from '../src/utils/textDiff.ts';
+
+test('computeSideBySideDiff aligns unchanged, modified, removed, and added lines accurately', () => {
+  const left = [
+    '[00:00] Hook: Meet Lumina Desk Pro.',
+    'Old tagline that will be removed.',
+    'Anchor scene transition.',
+    'Cut to walnut desk setup.',
+    'CTA: Order today.',
+  ].join('\n');
+
+  const right = [
+    '[00:00] Hook: Meet Lumina Desk Pro.',
+    'Anchor scene transition.',
+    'Cut to studio-lit walnut desk setup.',
+    'CTA: Order today.',
+    '[00:25] End card with QR code.',
+  ].join('\n');
+
+  const diff = computeSideBySideDiff(left, right);
+  assert.equal(diff.unchangedCount, 3);
+  assert.equal(diff.removedCount, 2);
+  assert.equal(diff.addedCount, 2);
+  assert.ok(diff.rows.some((r) => r.type === 'removed' && r.leftText.includes('Old tagline')));
+  assert.ok(diff.rows.some((r) => r.type === 'modified' && r.rightText.includes('studio-lit')));
+  assert.ok(diff.rows.some((r) => r.type === 'added' && r.rightText.includes('End card')));
+});
+

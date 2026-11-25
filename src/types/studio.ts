@@ -2,10 +2,87 @@ export interface UserProfile {
   id: string;
   uid: string;
   email: string;
+  pendingEmail?: string | null;
+  fullName?: string | null;
+  username?: string | null;
   displayName: string | null;
   avatarUrl: string | null;
+  profileImageKey?: string | null;
+  phoneNumber?: string | null;
+  bio?: string | null;
+  country?: string | null;
+  state?: string | null;
+  city?: string | null;
+  website?: string | null;
+  linkedinUrl?: string | null;
+  githubUrl?: string | null;
   creditsBalance: number;
   role: string;
+  isActive?: boolean;
+  isVerified?: boolean;
+  hasLocalPassword?: boolean;
+  passwordChangedAt?: string | null;
+  lastLoginAt?: string | null;
+  deletionRequestedAt?: string | null;
+  deletionScheduledFor?: string | null;
+  deletionReason?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface UserPreferences {
+  id: string;
+  userId: string;
+  theme: 'light' | 'dark' | 'system';
+  language: string;
+  timezone: string;
+  defaultAspectRatio: '16:9' | '9:16' | '1:1' | '4:3';
+  defaultExportQuality: 'standard' | 'low';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NotificationPreferences {
+  id: string;
+  userId: string;
+  emailNotifications: boolean;
+  projectUpdates: boolean;
+  generationCompleted: boolean;
+  generationFailed: boolean;
+  productAnnouncements: boolean;
+  marketingEmails: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserSecurityInfo {
+  currentLoginStatus: 'active';
+  authMethod: 'password' | 'google_oauth' | 'google_and_password';
+  emailVerified: boolean;
+  pendingEmail: string | null;
+  hasLocalPassword: boolean;
+  passwordLastChangedAt: string | null;
+  lastLoginAt: string | null;
+  activeSessionCount: number;
+  googleOAuthConfigured: boolean;
+  googleConnected: boolean;
+  recommendations: Array<{
+    id: string;
+    title: string;
+    detail: string;
+    status: 'done' | 'action';
+  }>;
+}
+
+export interface UserSessionInfo {
+  id: string;
+  familyId: string;
+  rememberMe: boolean;
+  userAgent: string;
+  ipAddress: string;
+  createdAt: string;
+  expiresAt: string;
+  isCurrent: boolean;
 }
 
 export interface Project {
@@ -32,6 +109,16 @@ export interface DashboardStats {
   failedJobs: number;
 }
 
+export interface AIUsageStats {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
+  provider?: string;
+  isMock?: boolean;
+  providerRequestId?: string;
+}
+
 export interface ScriptRevision {
   id: string;
   projectId: string;
@@ -44,10 +131,13 @@ export interface ScriptRevision {
   language: string;
   toneOfVoice: string;
   marketingObjective: string;
+  topic?: string;
+  contentType?: string;
   content: string;
   aiModelUsed: string;
   aiNotes: string | null;
   groundingSources: Array<{ title: string; uri: string }> | null;
+  usageJson?: AIUsageStats | null;
   createdByUid: string;
   createdAt: string;
 }
@@ -101,15 +191,63 @@ export interface GenerationJob {
   actionId: string;
   sceneId: string | null;
   status: 'queued' | 'processing' | 'succeeded' | 'failed' | 'retrying' | 'cancelled' | 'timed_out';
+  progress?: number;
+  providerJobId?: string | null;
   attemptCount: number;
   errorMessage: string | null;
   resultAssetId: string | null;
+  startedAt?: string | null;
   createdAt: string;
   completedAt: string | null;
   mediaType: string;
   provider: string;
   model: string;
+  actionStatus?: string;
   asset?: Asset | null;
+}
+
+export interface ProviderOverview {
+  defaults: {
+    llmProvider: 'gemini' | 'openai' | 'mock';
+    imageProvider: 'gemini' | 'openai' | 'mock';
+    videoProvider: 'gemini' | 'openai' | 'mock';
+    requestTimeoutSec: number;
+    maxRetries: number;
+  };
+  configuredKeys: {
+    gemini: boolean;
+    openai: boolean;
+    openaiVideoEndpoint: boolean;
+  };
+  warnings: string[];
+  providers: {
+    llm: Array<{
+      name: string;
+      isMock: boolean;
+      supportsSearchGrounding: boolean;
+      supportsStructuredJson: boolean;
+      limitations: string[];
+    }>;
+    image: Array<{
+      name: string;
+      isMock: boolean;
+      supportedAspectRatios: string[];
+      supportsImageEditing: boolean;
+      supportsSearchGrounding: boolean;
+      supportsResolutions: string[];
+      limitations: string[];
+    }>;
+    video: Array<{
+      name: string;
+      isMock: boolean;
+      supportedAspectRatios: string[];
+      supportsImageToVideo: boolean;
+      minDurationSec: number;
+      maxDurationSec: number;
+      supportedResolutions: string[];
+      limitations: string[];
+    }>;
+  };
 }
 
 export interface ExportRecord {

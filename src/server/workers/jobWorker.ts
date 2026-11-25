@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index.ts';
 import {
   assets,
@@ -18,20 +18,40 @@ import {
   scenes,
   users,
 } from '../../db/schema.ts';
-import { getMediaProvider, MediaGenerationRequest } from '../providers/mediaProvider.ts';
+import { loadAIConfig } from '../ai/config.ts';
+import { ProviderTimeoutError } from '../ai/exceptions.ts';
+import {
+  getMediaProvider,
+  type MediaGenerationOutput,
+  type MediaGenerationRequest,
+} from '../providers/mediaProvider.ts';
 import { createSignedMediaUrl, readObjectBuffer, resolveSafeStoragePath, saveObject } from '../storage.ts';
 
 const execFileAsync = promisify(execFile);
 
+// Track active in-flight jobs for cooperative AbortController cancellation
+const activeControllers = new Map<string, AbortController>();
+
+// Optional deterministic hook used exclusively by automated tests to simulate delays/timeouts/failures
+export type JobWorkerTestSimulator = (
+  req: MediaGenerationRequest,
+  context: { jobId: string; attemptId: string; attemptNumber: number; signal: AbortSignal }
+) => Promise<MediaGenerationOutput | null>;
+
+let testSimulator: JobWorkerTestSimulator | null = null;
+export function setJobWorkerTestSimulator(fn: JobWorkerTestSimulator | null) {
+  testSimulator = fn;
+}
+
 export function calculateCreditCost(
   mediaType: 'image' | 'video' | 'audio_tts' | 'audio_music',
-  provider: 'gemini' | 'mock',
+  provider: 'gemini' | 'openai' | 'mock',
   model: string
 ): number {
   if (provider === 'mock') return 1;
   switch (mediaType) {
     case 'image':
-      return model === 'gemini-nano-banana-2.1' ? 12 : 5;
+      return provider === 'openai' ? 10 : model === 'gemini-nano-banana-2.1' ? 12 : 5;
     case 'video':
       return 35;
     case 'audio_tts':
@@ -43,16 +63,32 @@ export function calculateCreditCost(
   }
 }
 
+function actionTypeForMedia(mediaType: MediaGenerationRequest['mediaType']): string {
+  switch (mediaType) {
+    case 'image':
+      return 'image_generation';
+    case 'video':
+      return 'video_generation';
+    case 'audio_tts':
+      return 'tts_generation';
+    case 'audio_music':
+      return 'music_generation';
+    default:
+      return 'media_generation';
+  }
+}
+
 export interface EnqueueGenerationParams {
   projectId: string;
   sceneId?: string | null;
   userId: string;
   idempotencyKey?: string;
+  requestTimeoutMs?: number;
   request: MediaGenerationRequest;
 }
 
 export async function enqueueMediaGenerationJob(params: EnqueueGenerationParams) {
-  const { projectId, sceneId, userId, request } = params;
+  const { projectId, sceneId, userId, request, requestTimeoutMs } = params;
   const idempotencyKey = params.idempotencyKey || crypto.randomUUID();
   const estimatedCredits = calculateCreditCost(request.mediaType, request.provider, request.model);
 
@@ -106,10 +142,12 @@ export async function enqueueMediaGenerationJob(params: EnqueueGenerationParams)
         sceneId: sceneId ?? null,
         userId,
         idempotencyKey,
+        actionType: actionTypeForMedia(request.mediaType),
         mediaType: request.mediaType,
         provider: request.provider,
         model: request.model,
         prompt: request.prompt,
+        status: 'queued',
         configJson: {
           aspectRatio: request.aspectRatio,
           resolution: request.resolution,
@@ -144,7 +182,9 @@ export async function enqueueMediaGenerationJob(params: EnqueueGenerationParams)
         projectId,
         sceneId: sceneId ?? null,
         userId,
+        provider: request.provider,
         status: 'queued',
+        progress: 5,
         attemptCount: 1,
       })
       .returning();
@@ -175,9 +215,14 @@ export async function enqueueMediaGenerationJob(params: EnqueueGenerationParams)
   });
 
   if (!txResult.isDuplicate && txResult.attemptId) {
-    // Dispatch asynchronously so HTTP 202 returns immediately
     setImmediate(() => {
-      void executeGenerationAttempt(txResult.job.id, txResult.attemptId!, request).catch((err) => {
+      void executeGenerationAttempt(
+        txResult.job.id,
+        txResult.attemptId!,
+        1,
+        request,
+        requestTimeoutMs
+      ).catch((err) => {
         console.error('Unhandled background generation error:', err);
       });
     });
@@ -189,7 +234,8 @@ export async function enqueueMediaGenerationJob(params: EnqueueGenerationParams)
 export async function retryGenerationJob(
   jobId: string,
   userId: string,
-  referenceImage?: { base64: string; mimeType: string }
+  referenceImage?: { base64: string; mimeType: string },
+  requestTimeoutMs?: number
 ) {
   const prep = await db.transaction(async (tx) => {
     const jobRows = await tx
@@ -205,6 +251,9 @@ export async function retryGenerationJob(
     if (job.status === 'succeeded' || job.acceptedAttemptId) {
       throw new Error('Job already succeeded and has an accepted asset.');
     }
+    if (job.status === 'queued' || job.status === 'processing' || job.status === 'retrying') {
+      throw new Error('Job is currently active and cannot be retried yet.');
+    }
 
     const actionRows = await tx
       .select()
@@ -218,17 +267,23 @@ export async function retryGenerationJob(
 
     const nextAttemptNum = job.attemptCount + 1;
 
-    // Update job status to retrying — note we REUSE action.id and do NOT insert a new billingTransaction
+    // Technical retry REUSES action.id and NEVER inserts another billingTransaction or deducts credits
     const [updatedJob] = await tx
       .update(generationJobs)
       .set({
         status: 'retrying',
+        progress: 10,
         attemptCount: nextAttemptNum,
         errorMessage: null,
         updatedAt: new Date(),
       })
       .where(eq(generationJobs.id, job.id))
       .returning();
+
+    await tx
+      .update(generationActions)
+      .set({ status: 'processing' })
+      .where(eq(generationActions.id, action.id));
 
     const [attempt] = await tx
       .insert(generationAttempts)
@@ -253,7 +308,7 @@ export async function retryGenerationJob(
   const cfg = (prep.action.configJson || {}) as Record<string, unknown>;
   const req: MediaGenerationRequest = {
     mediaType: prep.action.mediaType as MediaGenerationRequest['mediaType'],
-    provider: prep.action.provider as 'gemini' | 'mock',
+    provider: prep.action.provider as 'gemini' | 'openai' | 'mock',
     model: prep.action.model,
     prompt: prep.action.prompt,
     aspectRatio: cfg.aspectRatio as string | undefined,
@@ -270,7 +325,13 @@ export async function retryGenerationJob(
   };
 
   setImmediate(() => {
-    void executeGenerationAttempt(prep.job.id, prep.attempt.id, req).catch((err) => {
+    void executeGenerationAttempt(
+      prep.job.id,
+      prep.attempt.id,
+      prep.attempt.attemptNumber,
+      req,
+      requestTimeoutMs
+    ).catch((err) => {
       console.error('Unhandled retry error:', err);
     });
   });
@@ -278,26 +339,298 @@ export async function retryGenerationJob(
   return prep;
 }
 
+export async function cancelGenerationJob(jobId: string, userId: string) {
+  const controller = activeControllers.get(jobId);
+  if (controller) {
+    controller.abort(new Error('Job cancelled by user.'));
+  }
+
+  return db.transaction(async (tx) => {
+    const jobRows = await tx
+      .select()
+      .from(generationJobs)
+      .where(and(eq(generationJobs.id, jobId), eq(generationJobs.userId, userId)))
+      .limit(1);
+    const job = jobRows[0];
+    if (!job) {
+      throw new Error('Generation job not found.');
+    }
+    if (job.status === 'succeeded' || job.status === 'cancelled') {
+      return job;
+    }
+
+    const [updated] = await tx
+      .update(generationJobs)
+      .set({
+        status: 'cancelled',
+        errorMessage: 'Cancelled by user.',
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(generationJobs.id, job.id))
+      .returning();
+
+    await tx
+      .update(generationActions)
+      .set({ status: 'cancelled' })
+      .where(eq(generationActions.id, job.actionId));
+
+    await tx
+      .update(generationAttempts)
+      .set({
+        status: 'stale_ignored',
+        errorMessage: 'Job cancelled before attempt completed.',
+        finishedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(generationAttempts.jobId, job.id),
+          inArray(generationAttempts.status, ['queued', 'processing'])
+        )
+      );
+
+    if (job.sceneId) {
+      const scRows = await tx.select().from(scenes).where(eq(scenes.id, job.sceneId)).limit(1);
+      const sc = scRows[0];
+      if (sc) {
+        await tx
+          .update(scenes)
+          .set({
+            generationStatus: sc.selectedAssetId ? 'succeeded' : 'cancelled',
+            updatedAt: new Date(),
+          })
+          .where(eq(scenes.id, sc.id));
+      }
+    }
+
+    return updated;
+  });
+}
+
+export async function acceptAssetForScene(assetId: string, userId: string, targetSceneId?: string) {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select()
+      .from(assets)
+      .where(and(eq(assets.id, assetId), eq(assets.userId, userId)))
+      .limit(1);
+    const asset = rows[0];
+    if (!asset) {
+      throw new Error('Asset not found.');
+    }
+
+    const resolvedSceneId = targetSceneId || asset.sceneId;
+    if (!resolvedSceneId) {
+      throw new Error('Target sceneId is required.');
+    }
+
+    const scRows = await tx.select().from(scenes).where(eq(scenes.id, resolvedSceneId)).limit(1);
+    const sc = scRows[0];
+    if (!sc) {
+      throw new Error('Target scene not found.');
+    }
+
+    const projRows = await tx
+      .select()
+      .from(projects)
+      .where(and(eq(projects.id, sc.projectId), eq(projects.userId, userId)))
+      .limit(1);
+    if (!projRows[0]) {
+      throw new Error('Forbidden: scene belongs to another account.');
+    }
+
+    const [updatedAsset] = await tx
+      .update(assets)
+      .set({ isAccepted: true, sceneId: resolvedSceneId })
+      .where(eq(assets.id, asset.id))
+      .returning();
+
+    if (asset.assetType === 'audio_tts') {
+      await tx
+        .update(scenes)
+        .set({ voiceoverAssetId: asset.id, updatedAt: new Date() })
+        .where(eq(scenes.id, resolvedSceneId));
+    } else {
+      await tx
+        .update(scenes)
+        .set({ selectedAssetId: asset.id, generationStatus: 'succeeded', updatedAt: new Date() })
+        .where(eq(scenes.id, resolvedSceneId));
+
+      // Cancel/supersede any other in-flight jobs on this scene so late responses cannot overwrite the user's choice
+      const inFlight = await tx
+        .select()
+        .from(generationJobs)
+        .where(
+          and(
+            eq(generationJobs.sceneId, resolvedSceneId),
+            inArray(generationJobs.status, ['queued', 'processing', 'retrying'])
+          )
+        );
+      for (const job of inFlight) {
+        if (asset.generationActionId && job.actionId === asset.generationActionId) continue;
+        await tx
+          .update(generationJobs)
+          .set({
+            status: 'cancelled',
+            errorMessage: 'Superseded by user-accepted asset.',
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(generationJobs.id, job.id));
+        const ctrl = activeControllers.get(job.id);
+        if (ctrl) ctrl.abort(new Error('Superseded by user-accepted asset.'));
+      }
+    }
+
+    return updatedAsset;
+  });
+}
+
+export async function rejectAssetForScene(assetId: string, userId: string) {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select()
+      .from(assets)
+      .where(and(eq(assets.id, assetId), eq(assets.userId, userId)))
+      .limit(1);
+    const asset = rows[0];
+    if (!asset) {
+      throw new Error('Asset not found.');
+    }
+
+    const [updatedAsset] = await tx
+      .update(assets)
+      .set({ isAccepted: false })
+      .where(eq(assets.id, asset.id))
+      .returning();
+
+    let fallbackAssetId: string | null = null;
+    if (asset.sceneId) {
+      const scRows = await tx.select().from(scenes).where(eq(scenes.id, asset.sceneId)).limit(1);
+      const sc = scRows[0];
+      if (sc && sc.selectedAssetId === asset.id) {
+        // Preserve previous accepted asset on the scene if one exists
+        const prevRows = await tx
+          .select()
+          .from(assets)
+          .where(
+            and(
+              eq(assets.sceneId, sc.id),
+              eq(assets.isAccepted, true),
+              ne(assets.id, asset.id)
+            )
+          )
+          .orderBy(desc(assets.createdAt))
+          .limit(1);
+
+        fallbackAssetId = prevRows[0]?.id ?? null;
+        await tx
+          .update(scenes)
+          .set({
+            selectedAssetId: fallbackAssetId,
+            generationStatus: fallbackAssetId ? 'succeeded' : 'idle',
+            updatedAt: new Date(),
+          })
+          .where(eq(scenes.id, sc.id));
+      } else if (sc && sc.voiceoverAssetId === asset.id) {
+        await tx
+          .update(scenes)
+          .set({ voiceoverAssetId: null, updatedAt: new Date() })
+          .where(eq(scenes.id, sc.id));
+      }
+    }
+
+    return { asset: updatedAsset, fallbackAssetId };
+  });
+}
+
+async function runWithTimeout<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  providerName: string,
+  jobId: string
+): Promise<T> {
+  const controller = new AbortController();
+  activeControllers.set(jobId, controller);
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      const err = new ProviderTimeoutError(
+        `AI provider "${providerName}" exceeded timeout of ${Math.round(timeoutMs / 1000)}s.`,
+        providerName
+      );
+      controller.abort(err);
+      reject(err);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([work(controller.signal), timeoutPromise]);
+  } catch (err) {
+    if (timedOut) {
+      throw new ProviderTimeoutError(
+        `AI provider "${providerName}" exceeded timeout of ${Math.round(timeoutMs / 1000)}s.`,
+        providerName
+      );
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+    activeControllers.delete(jobId);
+  }
+}
+
 async function executeGenerationAttempt(
   jobId: string,
   attemptId: string,
-  request: MediaGenerationRequest
+  attemptNumber: number,
+  request: MediaGenerationRequest,
+  requestTimeoutMs?: number
 ) {
-  const startedAt = Date.now();
-  try {
-    await db
-      .update(generationAttempts)
-      .set({ status: 'processing' })
-      .where(eq(generationAttempts.id, attemptId));
+  const startedAtMs = Date.now();
+  const startedAtDate = new Date(startedAtMs);
+  const effectiveTimeoutMs =
+    requestTimeoutMs ?? Math.max(500, loadAIConfig().requestTimeoutSec * 1000);
 
+  try {
     const jobRows = await db.select().from(generationJobs).where(eq(generationJobs.id, jobId)).limit(1);
     const job = jobRows[0];
     if (!job) return;
+    if (job.status === 'cancelled') {
+      await db
+        .update(generationAttempts)
+        .set({
+          status: 'stale_ignored',
+          errorMessage: 'Job already cancelled before execution.',
+          finishedAt: new Date(),
+        })
+        .where(eq(generationAttempts.id, attemptId));
+      return;
+    }
+
+    await db
+      .update(generationAttempts)
+      .set({ status: 'processing', startedAt: startedAtDate })
+      .where(eq(generationAttempts.id, attemptId));
 
     await db
       .update(generationJobs)
-      .set({ status: 'processing', updatedAt: new Date() })
+      .set({
+        status: 'processing',
+        progress: 25,
+        startedAt: job.startedAt || startedAtDate,
+        updatedAt: new Date(),
+      })
       .where(eq(generationJobs.id, jobId));
+
+    await db
+      .update(generationActions)
+      .set({ status: 'processing' })
+      .where(eq(generationActions.id, job.actionId));
 
     if (job.sceneId && (request.mediaType === 'image' || request.mediaType === 'video')) {
       await db
@@ -306,16 +639,41 @@ async function executeGenerationAttempt(
         .where(eq(scenes.id, job.sceneId));
     }
 
-    const provider = getMediaProvider(request.provider);
-    const output = await provider.generate(request);
+    const output = await runWithTimeout(
+      async (signal) => {
+        if (testSimulator) {
+          const simResult = await testSimulator(request, {
+            jobId,
+            attemptId,
+            attemptNumber,
+            signal,
+          });
+          if (simResult) return simResult;
+        }
+        const provider = getMediaProvider(request.provider);
+        return provider.generate(request, signal);
+      },
+      effectiveTimeoutMs,
+      request.provider,
+      jobId
+    );
+
+    await db
+      .update(generationJobs)
+      .set({
+        progress: 75,
+        providerJobId: output.providerJobId ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(generationJobs.id, jobId));
 
     const fileId = crypto.randomUUID();
     const fileName = `${request.mediaType}_${fileId.slice(0, 8)}.${output.fileExtension}`;
     const storageKey = `projects/${job.projectId}/${request.mediaType}/${fileName}`;
     const { sizeBytes } = await saveObject(storageKey, output.buffer);
-    const durationMs = Date.now() - startedAt;
+    const durationMs = Date.now() - startedAtMs;
 
-    // Transactional acceptance check (prevents late/stale results from overwriting an already accepted asset)
+    // Transactional acceptance & late-response guard
     await db.transaction(async (tx) => {
       const freshJobRows = await tx
         .select()
@@ -325,18 +683,51 @@ async function executeGenerationAttempt(
       const freshJob = freshJobRows[0];
       if (!freshJob) return;
 
-      if (freshJob.acceptedAttemptId && freshJob.acceptedAttemptId !== attemptId) {
-        // Late response protection: mark stale_ignored and do not overwrite accepted asset
+      const isLateOrCancelled =
+        freshJob.status === 'cancelled' ||
+        freshJob.status === 'timed_out' ||
+        Boolean(freshJob.acceptedAttemptId && freshJob.acceptedAttemptId !== attemptId);
+
+      if (isLateOrCancelled) {
         await tx
           .update(generationAttempts)
           .set({
             status: 'stale_ignored',
+            providerRequestId: output.providerRequestId ?? output.providerJobId ?? null,
+            usageJson: (output.usage as unknown as Record<string, unknown>) ?? null,
             durationMs,
             finishedAt: new Date(),
-            errorMessage: 'Ignored late completion because another attempt was already accepted.',
+            errorMessage:
+              freshJob.status === 'cancelled'
+                ? 'Ignored late provider completion because the job was cancelled or superseded.'
+                : freshJob.status === 'timed_out'
+                  ? 'Ignored late provider completion after timeout.'
+                  : 'Ignored late completion because another attempt was already accepted.',
           })
           .where(eq(generationAttempts.id, attemptId));
         return;
+      }
+
+      // Also verify scene does not already have an explicitly accepted asset created after this job
+      let sceneHasNewerAccepted = false;
+      if (freshJob.sceneId) {
+        const scRows = await tx
+          .select()
+          .from(scenes)
+          .where(eq(scenes.id, freshJob.sceneId))
+          .limit(1);
+        const sc = scRows[0];
+        if (sc?.selectedAssetId) {
+          const curAssetRows = await tx
+            .select()
+            .from(assets)
+            .where(eq(assets.id, sc.selectedAssetId))
+            .limit(1);
+          const curAsset = curAssetRows[0];
+          if (curAsset && curAsset.isAccepted && curAsset.createdAt > freshJob.createdAt) {
+            sceneHasNewerAccepted = true;
+          }
+        }
       }
 
       const [asset] = await tx
@@ -354,20 +745,29 @@ async function executeGenerationAttempt(
           height: output.height ?? null,
           durationSec: output.durationSec ?? null,
           provider: request.provider,
-          model: request.model,
+          model: output.modelUsed || request.model,
           promptUsed: request.prompt,
-          metadataJson: output.metadata ?? {},
+          metadataJson: {
+            ...(output.metadata ?? {}),
+            providerJobId: output.providerJobId,
+            providerRequestId: output.providerRequestId,
+          },
           generationActionId: freshJob.actionId,
-          isAccepted: true,
+          isAccepted: !sceneHasNewerAccepted,
         })
         .returning();
 
       await tx
         .update(generationAttempts)
         .set({
-          status: 'succeeded',
+          status: sceneHasNewerAccepted ? 'stale_ignored' : 'succeeded',
+          providerRequestId: output.providerRequestId ?? output.providerJobId ?? null,
+          usageJson: (output.usage as unknown as Record<string, unknown>) ?? null,
           durationMs,
           finishedAt: new Date(),
+          ...(sceneHasNewerAccepted
+            ? { errorMessage: 'Scene already has a newer accepted asset; saved as candidate only.' }
+            : {}),
         })
         .where(eq(generationAttempts.id, attemptId));
 
@@ -375,12 +775,19 @@ async function executeGenerationAttempt(
         .update(generationJobs)
         .set({
           status: 'succeeded',
-          acceptedAttemptId: attemptId,
+          progress: 100,
+          providerJobId: output.providerJobId ?? freshJob.providerJobId ?? null,
+          acceptedAttemptId: sceneHasNewerAccepted ? freshJob.acceptedAttemptId : attemptId,
           resultAssetId: asset.id,
           updatedAt: new Date(),
           completedAt: new Date(),
         })
         .where(eq(generationJobs.id, jobId));
+
+      await tx
+        .update(generationActions)
+        .set({ status: 'completed' })
+        .where(eq(generationActions.id, freshJob.actionId));
 
       await tx
         .update(billingTransactions)
@@ -391,7 +798,7 @@ async function executeGenerationAttempt(
         })
         .where(eq(billingTransactions.actionId, freshJob.actionId));
 
-      if (freshJob.sceneId) {
+      if (freshJob.sceneId && !sceneHasNewerAccepted) {
         if (request.mediaType === 'image' || request.mediaType === 'video') {
           await tx
             .update(scenes)
@@ -438,7 +845,10 @@ async function executeGenerationAttempt(
       }
     });
   } catch (error: unknown) {
-    const durationMs = Date.now() - startedAt;
+    const durationMs = Date.now() - startedAtMs;
+    const isTimeout =
+      error instanceof ProviderTimeoutError ||
+      (error instanceof Error && error.name === 'ProviderTimeoutError');
     const message = error instanceof Error ? error.message : 'Generation failed.';
     console.error(`Generation attempt ${attemptId} failed:`, error);
 
@@ -450,32 +860,53 @@ async function executeGenerationAttempt(
         .limit(1);
       const freshJob = freshJobRows[0];
 
+      if (freshJob?.status === 'cancelled') {
+        await tx
+          .update(generationAttempts)
+          .set({
+            status: 'stale_ignored',
+            errorMessage: 'Attempt aborted because job was cancelled.',
+            durationMs,
+            finishedAt: new Date(),
+          })
+          .where(eq(generationAttempts.id, attemptId));
+        return;
+      }
+
+      const failStatus = isTimeout ? 'timed_out' : 'failed';
+
       await tx
         .update(generationAttempts)
         .set({
-          status: 'failed',
+          status: failStatus,
           errorMessage: message,
           durationMs,
           finishedAt: new Date(),
         })
         .where(eq(generationAttempts.id, attemptId));
 
-      // Never overwrite an already accepted job
+      // Never overwrite an already accepted job or wipe existing scene selectedAssetId
       if (freshJob && !freshJob.acceptedAttemptId) {
         await tx
           .update(generationJobs)
           .set({
-            status: 'failed',
+            status: failStatus,
+            progress: 0,
             errorMessage: message,
             updatedAt: new Date(),
           })
           .where(eq(generationJobs.id, jobId));
 
+        await tx
+          .update(generationActions)
+          .set({ status: 'failed' })
+          .where(eq(generationActions.id, freshJob.actionId));
+
         if (freshJob.sceneId) {
           await tx
             .update(scenes)
             .set({
-              generationStatus: 'failed',
+              generationStatus: failStatus,
               updatedAt: new Date(),
             })
             .where(eq(scenes.id, freshJob.sceneId));
@@ -491,8 +922,9 @@ export async function enqueueExportJob(params: {
   title: string;
   aspectRatio: string;
   musicAssetId?: string | null;
+  quality?: 'standard' | 'low';
 }) {
-  const { projectId, userId, title, aspectRatio, musicAssetId } = params;
+  const { projectId, userId, title, aspectRatio, musicAssetId, quality = 'standard' } = params;
 
   const result = await db.transaction(async (tx) => {
     const projectScenes = await tx
@@ -515,10 +947,18 @@ export async function enqueueExportJob(params: {
     }
 
     const totalDurationSec = projectScenes.reduce((sum, s) => sum + (s.durationSec || 5), 0);
-    const resolution = aspectRatio === '9:16' ? '720x1280' : '1280x720';
+    const resolution =
+      quality === 'low'
+        ? aspectRatio === '9:16'
+          ? '360x640'
+          : '640x360'
+        : aspectRatio === '9:16'
+          ? '720x1280'
+          : '1280x720';
 
     const snapshot = {
       aspectRatio,
+      quality,
       musicAssetId: musicAssetId || null,
       scenes: projectScenes.map((s) => ({
         sceneId: s.id,
@@ -553,7 +993,10 @@ export async function enqueueExportJob(params: {
         projectId,
         status: 'queued',
         progressPct: 5,
-        currentStep: 'Queued for FFmpeg rendering',
+        currentStep:
+          quality === 'low'
+            ? 'Queued for fast 360p quick draft render'
+            : 'Queued for FFmpeg rendering',
       })
       .returning();
 
@@ -594,6 +1037,10 @@ async function processExportJob(exportId: string) {
     const [widthStr, heightStr] = exp.resolution.split('x');
     const width = Number(widthStr) || 1280;
     const height = Number(heightStr) || 720;
+    const isLowResDraft = Math.min(width, height) <= 360;
+    const targetFps = isLowResDraft ? 24 : 30;
+    const encodePreset = isLowResDraft ? 'ultrafast' : 'veryfast';
+    const encodeCrf = isLowResDraft ? '28' : '23';
 
     const segmentPaths: string[] = [];
     const totalScenes = exp.snapshotJson.scenes.length;
@@ -625,7 +1072,7 @@ async function processExportJob(exportId: string) {
         }
       }
 
-      const scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#0B0D12,setsar=1,fps=30`;
+      const scaleFilter = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#0B0D12,setsar=1,fps=${targetFps}`;
 
       if (asset.assetType === 'image' || asset.mimeType.startsWith('image/')) {
         const args = ['-y', '-loop', '1', '-t', String(dur), '-i', srcPath];
@@ -639,6 +1086,10 @@ async function processExportJob(exportId: string) {
           scaleFilter,
           '-c:v',
           'libx264',
+          '-preset',
+          encodePreset,
+          '-crf',
+          encodeCrf,
           '-pix_fmt',
           'yuv420p',
           '-c:a',
@@ -653,7 +1104,6 @@ async function processExportJob(exportId: string) {
         );
         await execFileAsync('ffmpeg', args);
       } else {
-        // Video input: loop if shorter than dur, trim to dur
         const args = ['-y', '-stream_loop', '-1', '-t', String(dur), '-i', srcPath];
         if (voicePath) {
           args.push('-i', voicePath, '-map', '0:v:0', '-map', '1:a:0');
@@ -665,6 +1115,10 @@ async function processExportJob(exportId: string) {
           scaleFilter,
           '-c:v',
           'libx264',
+          '-preset',
+          encodePreset,
+          '-crf',
+          encodeCrf,
           '-pix_fmt',
           'yuv420p',
           '-c:a',
@@ -692,7 +1146,6 @@ async function processExportJob(exportId: string) {
         .where(eq(exportJobs.exportId, exportId));
     }
 
-    // Concatenate normalized segments
     const concatListPath = path.join(tmpDir, 'concat.txt');
     const concatContent = segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
     await fs.promises.writeFile(concatListPath, concatContent, 'utf8');

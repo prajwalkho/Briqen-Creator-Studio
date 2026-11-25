@@ -14,7 +14,7 @@ import {
   saveObject,
   verifySignedMediaParams,
 } from '../storage.ts';
-import { enqueueExportJob } from '../workers/jobWorker.ts';
+import { acceptAssetForScene, enqueueExportJob } from '../workers/jobWorker.ts';
 
 export const assetsAndExportsRouter = Router();
 
@@ -59,13 +59,15 @@ assetsAndExportsRouter.get('/media/signed', async (req, res) => {
           ? 'video/webm'
           : ext === '.png'
             ? 'image/png'
-            : ext === '.jpg' || ext === '.jpeg'
-              ? 'image/jpeg'
-              : ext === '.wav'
-                ? 'audio/wav'
-                : ext === '.mp3'
-                  ? 'audio/mpeg'
-                  : 'application/octet-stream';
+            : ext === '.webp'
+              ? 'image/webp'
+              : ext === '.jpg' || ext === '.jpeg'
+                ? 'image/jpeg'
+                : ext === '.wav'
+                  ? 'audio/wav'
+                  : ext === '.mp3'
+                    ? 'audio/mpeg'
+                    : 'application/octet-stream';
 
     if (download) {
       res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
@@ -202,38 +204,13 @@ assetsAndExportsRouter.post(
 
 assetsAndExportsRouter.post('/assets/:assetId/select', async (req: AuthRequest, res) => {
   try {
-    const rows = await db
-      .select()
-      .from(assets)
-      .where(and(eq(assets.id, req.params.assetId), eq(assets.userId, req.dbUser!.id)))
-      .limit(1);
-    const asset = rows[0];
-    if (!asset) return res.status(404).json({ success: false, message: 'Asset not found.' });
-
-    const targetSceneId = typeof req.body?.sceneId === 'string' ? req.body.sceneId : asset.sceneId;
-    if (!targetSceneId) {
-      return res.status(400).json({ success: false, message: 'Target sceneId is required.' });
-    }
-
-    await db.transaction(async (tx) => {
-      await tx.update(assets).set({ isAccepted: true, sceneId: targetSceneId }).where(eq(assets.id, asset.id));
-      if (asset.assetType === 'audio_tts') {
-        await tx
-          .update(scenes)
-          .set({ voiceoverAssetId: asset.id, updatedAt: new Date() })
-          .where(eq(scenes.id, targetSceneId));
-      } else {
-        await tx
-          .update(scenes)
-          .set({ selectedAssetId: asset.id, generationStatus: 'succeeded', updatedAt: new Date() })
-          .where(eq(scenes.id, targetSceneId));
-      }
-    });
-
+    const targetSceneId = typeof req.body?.sceneId === 'string' ? req.body.sceneId : undefined;
+    await acceptAssetForScene(req.params.assetId, req.dbUser!.id, targetSceneId);
     res.json({ success: true, message: 'Asset selected for scene' });
   } catch (error) {
-    console.error('Select asset error:', error);
-    res.status(500).json({ success: false, message: 'Failed to assign asset.' });
+    const msg = error instanceof Error ? error.message : 'Failed to assign asset.';
+    const status = msg.includes('not found') ? 404 : msg.includes('Forbidden') ? 403 : 400;
+    res.status(status).json({ success: false, message: msg });
   }
 });
 
@@ -290,20 +267,27 @@ assetsAndExportsRouter.post('/projects/:projectId/exports', async (req: AuthRequ
         ? req.body.musicAssetId
         : project.selectedMusicAssetId;
 
+    const quality = req.body?.quality === 'low' ? 'low' : 'standard';
+
     const result = await enqueueExportJob({
       projectId: project.id,
       userId: req.dbUser!.id,
       title,
       aspectRatio: project.aspectRatio,
       musicAssetId,
+      quality,
     });
 
     res.status(202).json({
       success: true,
-      message: 'Draft video export job queued',
+      message:
+        quality === 'low'
+          ? 'Low-resolution quick draft export job queued'
+          : 'Draft video export job queued',
       data: {
         export_id: result.exportRecord.id,
         job_id: result.exportJob.id,
+        resolution: result.exportRecord.resolution,
         status: result.exportJob.status,
         status_url: `/api/v1/exports/${result.exportRecord.id}`,
       },

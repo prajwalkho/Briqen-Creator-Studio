@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
+  Ban,
+  Check,
   Copy,
   Image as ImageIcon,
   Mic,
@@ -10,10 +13,11 @@ import {
   Trash2,
   Upload,
   Video,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { apiRequest } from '../../services/api';
-import { Asset, GenerationJob, Project, Scene } from '../../types/studio';
+import { Asset, GenerationJob, Project, ProviderOverview, Scene } from '../../types/studio';
 
 interface ScenesTabProps {
   project: Project;
@@ -22,6 +26,14 @@ interface ScenesTabProps {
   jobs: GenerationJob[];
   onRefreshAll: () => Promise<void>;
 }
+
+const STYLE_PRESETS = [
+  'Commercial studio lighting, sharp focus',
+  'Warm editorial film grain, shallow depth of field',
+  'Minimalist architectural product showcase',
+  'Vibrant social-first high-contrast aesthetic',
+  'Cyberpunk neon studio rim light',
+];
 
 export const ScenesTab: React.FC<ScenesTabProps> = ({
   project,
@@ -32,13 +44,17 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
 }) => {
   const { refreshProfile } = useAuth();
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(scenes[0]?.id ?? null);
-  const [provider, setProvider] = useState<'gemini' | 'mock'>('gemini');
-  const [imageModel, setImageModel] = useState<'gemini-nano-banana-2.1' | 'gemini-3.1-flash-lite-image'>(
-    'gemini-nano-banana-2.1'
+  const [providerOverview, setProviderOverview] = useState<ProviderOverview | null>(null);
+  const [provider, setProvider] = useState<'gemini' | 'openai' | 'mock'>('gemini');
+  const [imageModel, setImageModel] = useState<
+    'gemini-nano-banana-2.1' | 'gemini-3.1-flash-lite-image'
+  >('gemini-nano-banana-2.1');
+  const [imageAspectRatio, setImageAspectRatio] = useState<'16:9' | '9:16' | '1:1'>(
+    project.aspectRatio === '9:16' ? '9:16' : project.aspectRatio === '1:1' ? '1:1' : '16:9'
   );
   const [resolution, setResolution] = useState<'1K' | '2K' | '4K'>('1K');
   const [videoRes, setVideoRes] = useState<'720p' | '1080p' | '360p'>('720p');
-  const [styleHint, setStyleHint] = useState('Commercial studio lighting, sharp focus');
+  const [styleHint, setStyleHint] = useState(STYLE_PRESETS[0]);
   const [useImageSearch, setUseImageSearch] = useState(false);
 
   // Voiceover (TTS) config
@@ -57,6 +73,20 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const activeScene = scenes.find((s) => s.id === selectedSceneId) || scenes[0] || null;
+
+  useEffect(() => {
+    let mounted = true;
+    apiRequest<{ data: ProviderOverview }>('/ai/providers')
+      .then((res) => {
+        if (!mounted || !res.data) return;
+        setProviderOverview(res.data);
+        setProvider(res.data.defaults.imageProvider);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedSceneId && scenes.length > 0) {
@@ -88,7 +118,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     const interval = setInterval(() => {
       void onRefreshAll();
       void refreshProfile();
-    }, 2500);
+    }, 2000);
     return () => clearInterval(interval);
   }, [hasRunningJobs, onRefreshAll, refreshProfile]);
 
@@ -136,7 +166,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     setError(null);
     setStatusMsg(null);
     try {
-      await apiRequest(`/scenes/${activeScene.id}`, {
+      await apiRequest(`/ai/scenes/${activeScene.id}`, {
         method: 'PATCH',
         body: JSON.stringify(editDraft),
       });
@@ -187,16 +217,17 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     setError(null);
     setStatusMsg(null);
     try {
-      const res = await apiRequest<{ message: string }>(`/scenes/${activeScene.id}/generate-image`, {
+      const res = await apiRequest<{ message: string }>(`/ai/images/generate`, {
         method: 'POST',
         body: JSON.stringify({
+          sceneId: activeScene.id,
           provider,
           model: imageModel,
           prompt,
-          aspectRatio: project.aspectRatio === '9:16' ? '9:16' : project.aspectRatio === '1:1' ? '1:1' : '16:9',
+          aspectRatio: imageAspectRatio,
           resolution,
           style: styleHint,
-          useSearchGrounding: useImageSearch,
+          useSearchGrounding: provider === 'gemini' ? useImageSearch : false,
           ...(refFileBase64 && refFileMime
             ? { referenceImageBase64: refFileBase64, referenceImageMimeType: refFileMime }
             : {}),
@@ -223,12 +254,13 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     setError(null);
     setStatusMsg(null);
     try {
-      const res = await apiRequest<{ message: string }>(`/scenes/${activeScene.id}/generate-video`, {
+      const res = await apiRequest<{ message: string }>(`/ai/videos/generate`, {
         method: 'POST',
         body: JSON.stringify({
+          sceneId: activeScene.id,
           provider,
           prompt,
-          aspectRatio: project.aspectRatio === '9:16' ? '9:16' : '16:9',
+          aspectRatio: imageAspectRatio === '9:16' ? '9:16' : '16:9',
           resolution: videoRes,
           style: styleHint,
           durationSec: Math.min(15, Math.max(3, Number(editDraft.durationSec) || 6)),
@@ -260,10 +292,11 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     setError(null);
     setStatusMsg(null);
     try {
+      const ttsProvider = provider === 'mock' ? 'mock' : 'gemini';
       const res = await apiRequest<{ message: string }>(`/scenes/${activeScene.id}/generate-tts`, {
         method: 'POST',
         body: JSON.stringify({
-          provider,
+          provider: ttsProvider,
           prompt: narration,
           voiceName,
           voiceStyle,
@@ -284,13 +317,29 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     setError(null);
     setStatusMsg(null);
     try {
-      const res = await apiRequest<{ message: string }>(`/jobs/${jobId}/retry`, {
+      const res = await apiRequest<{ message: string }>(`/ai/jobs/${jobId}/retry`, {
         method: 'POST',
       });
       setStatusMsg(res.message);
       await onRefreshAll();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Retry failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleCancelJob = async (jobId: string) => {
+    setBusy(`cancel-${jobId}`);
+    setError(null);
+    try {
+      const res = await apiRequest<{ message: string }>(`/ai/jobs/${jobId}/cancel`, {
+        method: 'POST',
+      });
+      setStatusMsg(res.message);
+      await onRefreshAll();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Cancel failed.');
     } finally {
       setBusy(null);
     }
@@ -318,6 +367,40 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     }
   };
 
+  const handleAcceptAsset = async (assetId: string) => {
+    if (!activeScene) return;
+    setBusy(`accept-${assetId}`);
+    setError(null);
+    try {
+      const res = await apiRequest<{ message: string }>(`/ai/assets/${assetId}/accept`, {
+        method: 'POST',
+        body: JSON.stringify({ sceneId: activeScene.id }),
+      });
+      setStatusMsg(res.message);
+      await onRefreshAll();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Accept failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRejectAsset = async (assetId: string) => {
+    setBusy(`reject-${assetId}`);
+    setError(null);
+    try {
+      const res = await apiRequest<{ message: string }>(`/ai/assets/${assetId}/reject`, {
+        method: 'POST',
+      });
+      setStatusMsg(res.message);
+      await onRefreshAll();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Reject failed.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const selectedAsset = activeScene
     ? assets.find((a) => a.id === activeScene.selectedAssetId) || null
     : null;
@@ -326,6 +409,13 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
     : null;
   const sceneJobs = activeScene
     ? jobs.filter((j) => j.sceneId === activeScene.id).slice(0, 6)
+    : [];
+  const sceneVisualAssets = activeScene
+    ? assets.filter(
+        (a) =>
+          a.sceneId === activeScene.id &&
+          (a.assetType === 'image' || a.assetType === 'video')
+      )
     : [];
 
   return (
@@ -339,7 +429,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
             type="button"
             disabled={busy !== null}
             onClick={handleAddScene}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>Add Scene</span>
@@ -391,7 +481,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                      <span>0{idx + 1}</span>
+                      <span>{String(idx + 1).padStart(2, '0')}</span>
                       <span aria-hidden="true">·</span>
                       <span>{scene.durationSec}s</span>
                       <span aria-hidden="true">·</span>
@@ -423,7 +513,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                     type="button"
                     disabled={busy !== null}
                     onClick={() => void handleDuplicate(activeScene.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs hover:bg-slate-100 dark:hover:bg-slate-800"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                   >
                     <Copy className="h-3.5 w-3.5" />
                     <span>Duplicate</span>
@@ -432,7 +522,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                     type="button"
                     disabled={busy !== null}
                     onClick={() => void handleDelete(activeScene.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs text-red-500 hover:bg-red-500/10"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs text-red-500 hover:bg-red-500/10 whitespace-nowrap shrink-0"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     <span>Delete</span>
@@ -441,7 +531,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                     type="button"
                     disabled={busy !== null}
                     onClick={handleSaveScene}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 text-xs font-semibold hover:opacity-90"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 text-xs font-semibold hover:opacity-90 whitespace-nowrap shrink-0"
                   >
                     <Save className="h-3.5 w-3.5" />
                     <span>{busy === 'save' ? 'Saving...' : 'Save Scene'}</span>
@@ -474,7 +564,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
-                    Duration (sec)
+                    Duration (3–15s for AI video)
                   </label>
                   <input
                     type="number"
@@ -546,56 +636,94 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800/70">
                 <h3 className="font-display text-base font-semibold">AI Media &amp; Voiceover Generation</h3>
                 <div className="flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-[#0B0D12] border border-slate-200 dark:border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setProvider('gemini')}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                      provider === 'gemini'
-                        ? 'bg-amber-500 text-slate-950 font-semibold'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    Gemini AI
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setProvider('mock')}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                      provider === 'mock'
-                        ? 'bg-slate-700 text-white font-semibold'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    Mock Provider
-                  </button>
+                  {(
+                    [
+                      ['gemini', 'Gemini', providerOverview ? providerOverview.configuredKeys.gemini : true],
+                      ['openai', 'OpenAI', providerOverview ? providerOverview.configuredKeys.openai : false],
+                      ['mock', 'Mock Mode', true],
+                    ] as const
+                  ).map(([key, label, configured]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setProvider(key)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                        provider === key
+                          ? key === 'mock'
+                            ? 'bg-slate-700 text-white font-semibold'
+                            : 'bg-amber-500 text-slate-950 font-semibold'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      {label}
+                      {!configured ? ' (No Key)' : ''}
+                    </button>
+                  ))}
                 </div>
               </div>
 
+              {provider === 'mock' && (
+                <div className="flex items-start gap-2.5 p-3 rounded-lg border border-amber-500/30 bg-amber-500/8 text-xs text-amber-700 dark:text-amber-300">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>
+                    Mock Media Mode active — FFmpeg generates labeled placeholder frames and clips locally (not real AI photography/video).
+                  </span>
+                </div>
+              )}
+
+              {provider === 'openai' &&
+                providerOverview &&
+                !providerOverview.configuredKeys.openaiVideoEndpoint && (
+                  <div className="flex items-start gap-2.5 p-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D12] text-xs text-slate-600 dark:text-slate-400">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
+                    <span>
+                      OpenAI Image generation uses DALL-E 3 (`16:9`, `9:16`, `1:1`). OpenAI Video requires `OPENAI_VIDEO_ENDPOINT` configured on the server.
+                    </span>
+                  </div>
+                )}
+
               <div className="grid md:grid-cols-2 gap-5">
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                        Aspect Ratio
+                      </label>
+                      <select
+                        value={imageAspectRatio}
+                        onChange={(e) =>
+                          setImageAspectRatio(e.target.value as '16:9' | '9:16' | '1:1')
+                        }
+                        className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
+                      >
+                        <option value="16:9">16:9</option>
+                        <option value="9:16">9:16</option>
+                        <option value="1:1">1:1 (Img)</option>
+                      </select>
+                    </div>
                     <div>
                       <label className="block text-[11px] font-medium text-slate-500 mb-1">
                         Image Model
                       </label>
                       <select
+                        disabled={provider !== 'gemini'}
                         value={imageModel}
                         onChange={(e) => setImageModel(e.target.value as typeof imageModel)}
-                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
+                        className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs disabled:opacity-60"
                       >
-                        <option value="gemini-nano-banana-2.1">Nano Banana 2.1 (1K-4K)</option>
-                        <option value="gemini-3.1-flash-lite-image">Flash Lite Image</option>
+                        <option value="gemini-nano-banana-2.1">Nano Banana 2.1</option>
+                        <option value="gemini-3.1-flash-lite-image">Flash Lite</option>
                       </select>
                     </div>
                     <div>
                       <label className="block text-[11px] font-medium text-slate-500 mb-1">
-                        Image / Video Size
+                        Img / Vid Size
                       </label>
-                      <div className="flex gap-1.5">
+                      <div className="flex gap-1">
                         <select
                           value={resolution}
                           onChange={(e) => setResolution(e.target.value as typeof resolution)}
-                          className="w-1/2 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
+                          className="w-1/2 px-1.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
                         >
                           <option value="1K">1K</option>
                           <option value="2K">2K</option>
@@ -604,7 +732,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                         <select
                           value={videoRes}
                           onChange={(e) => setVideoRes(e.target.value as typeof videoRes)}
-                          className="w-1/2 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
+                          className="w-1/2 px-1.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
                         >
                           <option value="720p">720p</option>
                           <option value="1080p">1080p</option>
@@ -615,9 +743,25 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-medium text-slate-500 mb-1">
-                      Visual Style Preset
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-medium text-slate-500">
+                        Visual Style Preset
+                      </label>
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) setStyleHint(e.target.value);
+                        }}
+                        className="text-[11px] text-amber-600 dark:text-amber-400 bg-transparent focus:outline-none"
+                      >
+                        <option value="">Load preset...</option>
+                        {STYLE_PRESETS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <input
                       type="text"
                       value={styleHint}
@@ -627,14 +771,21 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                    <label
+                      className={`inline-flex items-center gap-2 text-xs cursor-pointer ${
+                        provider === 'gemini'
+                          ? 'text-slate-600 dark:text-slate-300'
+                          : 'text-slate-400 dark:text-slate-600'
+                      }`}
+                    >
                       <input
                         type="checkbox"
-                        checked={useImageSearch}
+                        disabled={provider !== 'gemini'}
+                        checked={provider === 'gemini' && useImageSearch}
                         onChange={(e) => setUseImageSearch(e.target.checked)}
                         className="accent-amber-500"
                       />
-                      <span>Ground image with Google Web + Image Search</span>
+                      <span>Ground image with Google Web + Image Search (Gemini)</span>
                     </label>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -671,7 +822,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                           onChange={(e) => setAnimateFromSceneImage(e.target.checked)}
                           className="accent-amber-500"
                         />
-                        <span>Animate scene&apos;s current image into video (Omni 1.2 Flash)</span>
+                        <span>Animate scene&apos;s accepted image into video (Image-to-Video)</span>
                       </label>
                     )}
                   </div>
@@ -681,7 +832,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                       type="button"
                       disabled={busy !== null}
                       onClick={handleGenerateImage}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors disabled:opacity-60 whitespace-nowrap"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors disabled:opacity-60 whitespace-nowrap shrink-0"
                     >
                       <ImageIcon className="h-3.5 w-3.5" />
                       <span>{refFileBase64 ? 'Edit Image' : 'Generate Image'}</span>
@@ -691,7 +842,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                       type="button"
                       disabled={busy !== null}
                       onClick={handleGenerateVideo}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 font-semibold text-xs hover:opacity-90 transition-opacity disabled:opacity-60 whitespace-nowrap"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 font-semibold text-xs hover:opacity-90 transition-opacity disabled:opacity-60 whitespace-nowrap shrink-0"
                     >
                       <Video className="h-3.5 w-3.5" />
                       <span>
@@ -703,10 +854,10 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                       type="button"
                       disabled={busy !== null}
                       onClick={handleRegenerate}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
-                      <span>Regenerate</span>
+                      <span>Regenerate (New Action)</span>
                     </button>
                   </div>
 
@@ -736,7 +887,7 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                       type="button"
                       disabled={busy !== null}
                       onClick={handleGenerateTTS}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                     >
                       <Mic className="h-3.5 w-3.5 text-amber-500" />
                       <span>Generate Scene Voiceover</span>
@@ -745,27 +896,47 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                 </div>
 
                 <div className="space-y-4">
-                  <div className="aspect-video rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden flex items-center justify-center">
-                    {selectedAsset ? (
-                      selectedAsset.assetType === 'video' ? (
-                        <video
-                          key={selectedAsset.signedUrl}
-                          src={selectedAsset.signedUrl}
-                          controls
-                          className="h-full w-full object-contain"
-                        />
+                  <div className="space-y-2">
+                    <div className="aspect-video rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden flex items-center justify-center">
+                      {selectedAsset ? (
+                        selectedAsset.assetType === 'video' ? (
+                          <video
+                            key={selectedAsset.signedUrl}
+                            src={selectedAsset.signedUrl}
+                            controls
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <img
+                            src={selectedAsset.signedUrl}
+                            alt={activeScene.title}
+                            referrerPolicy="no-referrer"
+                            className="h-full w-full object-contain"
+                          />
+                        )
                       ) : (
-                        <img
-                          src={selectedAsset.signedUrl}
-                          alt={activeScene.title}
-                          referrerPolicy="no-referrer"
-                          className="h-full w-full object-contain"
-                        />
-                      )
-                    ) : (
-                      <div className="text-center p-4 space-y-1">
-                        <ImageIcon className="h-6 w-6 text-slate-600 mx-auto" />
-                        <p className="text-xs text-slate-500">No media selected for this scene yet</p>
+                        <div className="text-center p-4 space-y-1">
+                          <ImageIcon className="h-6 w-6 text-slate-600 mx-auto" />
+                          <p className="text-xs text-slate-500">No media selected for this scene yet</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {selectedAsset && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                        <span className="font-mono">
+                          {selectedAsset.provider} · {selectedAsset.model}
+                          {selectedAsset.provider === 'mock' ? ' · Simulated Mock Output' : ''}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={busy !== null}
+                          onClick={() => void handleRejectAsset(selectedAsset.id)}
+                          className="inline-flex items-center gap-1 text-red-500 hover:underline whitespace-nowrap"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Reject Active Asset</span>
+                        </button>
                       </div>
                     )}
                   </div>
@@ -784,38 +955,121 @@ export const ScenesTab: React.FC<ScenesTabProps> = ({
                     </div>
                   )}
 
+                  {sceneVisualAssets.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                        Generated Candidates ({sceneVisualAssets.length})
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {sceneVisualAssets.slice(0, 4).map((cand) => {
+                          const isCurrent = activeScene.selectedAssetId === cand.id;
+                          return (
+                            <div
+                              key={cand.id}
+                              className={`p-2 rounded-lg border text-[11px] space-y-1.5 ${
+                                isCurrent
+                                  ? 'border-amber-500/70 bg-amber-500/5'
+                                  : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12]'
+                              }`}
+                            >
+                              <div className="aspect-video rounded overflow-hidden bg-slate-900">
+                                {cand.assetType === 'video' ? (
+                                  <video src={cand.signedUrl} muted className="h-full w-full object-cover" />
+                                ) : (
+                                  <img
+                                    src={cand.signedUrl}
+                                    alt={cand.fileName}
+                                    referrerPolicy="no-referrer"
+                                    className="h-full w-full object-cover"
+                                  />
+                                )}
+                              </div>
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="truncate font-mono text-slate-500">
+                                  {cand.provider}
+                                </span>
+                                {!isCurrent ? (
+                                  <button
+                                    type="button"
+                                    disabled={busy !== null}
+                                    onClick={() => void handleAcceptAsset(cand.id)}
+                                    className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 font-semibold hover:underline whitespace-nowrap shrink-0"
+                                  >
+                                    <Check className="h-3 w-3" />
+                                    <span>Accept</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-amber-600 dark:text-amber-400 font-semibold whitespace-nowrap">
+                                    Accepted
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {sceneJobs.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                         Scene Generation Jobs
                       </p>
                       <div className="space-y-1.5">
-                        {sceneJobs.map((job) => (
-                          <div
-                            key={job.id}
-                            className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs"
-                          >
-                            <div className="min-w-0">
-                              <p className="font-medium truncate">
-                                {job.mediaType} · {job.model}
-                              </p>
-                              <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                                {job.status} · attempt #{job.attemptCount}
-                                {job.errorMessage ? ` · ${job.errorMessage}` : ''}
-                              </p>
+                        {sceneJobs.map((job) => {
+                          const isActive = ['queued', 'processing', 'retrying'].includes(job.status);
+                          const isRetryable = ['failed', 'timed_out', 'cancelled'].includes(job.status);
+                          const pct = job.progress ?? (job.status === 'succeeded' ? 100 : isActive ? 30 : 0);
+                          return (
+                            <div
+                              key={job.id}
+                              className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D12] text-xs space-y-1.5"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate">
+                                    {job.mediaType} · {job.provider} ({job.model})
+                                  </p>
+                                  <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                                    {job.status} · attempt #{job.attemptCount} · {pct}%
+                                    {job.errorMessage ? ` · ${job.errorMessage}` : ''}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {isActive && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleCancelJob(job.id)}
+                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 text-[11px] whitespace-nowrap"
+                                    >
+                                      <Ban className="h-3 w-3" />
+                                      <span>Cancel</span>
+                                    </button>
+                                  )}
+                                  {isRetryable && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleRetryJob(job.id)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-500 text-slate-950 font-semibold text-[11px] whitespace-nowrap"
+                                    >
+                                      <RotateCw className="h-3 w-3" />
+                                      <span>Retry (Free)</span>
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {isActive && (
+                                <div className="h-1 w-full rounded bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                                  <div
+                                    className="h-full bg-amber-500 transition-all duration-300"
+                                    style={{ width: `${Math.max(8, pct)}%` }}
+                                  />
+                                </div>
+                              )}
                             </div>
-                            {job.status === 'failed' && (
-                              <button
-                                type="button"
-                                onClick={() => void handleRetryJob(job.id)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-500 text-slate-950 font-semibold text-[11px] shrink-0"
-                              >
-                                <RotateCw className="h-3 w-3" />
-                                <span>Retry (Free)</span>
-                              </button>
-                            )}
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}

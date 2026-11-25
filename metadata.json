@@ -2,5 +2,7 @@
   "name": "Briqen Creator Studio",
   "description": "AI-powered marketing script, scene breakdown, multimodal media generation, timeline editing, and FFmpeg video export studio.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

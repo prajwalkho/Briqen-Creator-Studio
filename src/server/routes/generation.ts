@@ -12,11 +12,14 @@ import {
   scenes,
 } from '../../db/schema.ts';
 import { AuthRequest, requireAuth } from '../../middleware/auth.ts';
+import { AIProviderError } from '../ai/exceptions.ts';
+import { queueSceneImageGeneration } from '../ai/services/imageGenerationService.ts';
+import { queueSceneVideoGeneration } from '../ai/services/videoGenerationService.ts';
 import { analyzeMediaWithNeon } from '../providers/scriptService.ts';
 import { createSignedMediaUrl } from '../storage.ts';
 import {
+  cancelGenerationJob,
   enqueueMediaGenerationJob,
-  readAssetAsBase64,
   retryGenerationJob,
 } from '../workers/jobWorker.ts';
 
@@ -42,8 +45,8 @@ async function getOwnedScene(sceneId: string, userId: string) {
 }
 
 const imageGenSchema = z.object({
-  provider: z.enum(['gemini', 'mock']).optional().default('gemini'),
-  model: z.string().optional().default('gemini-nano-banana-2.1'),
+  provider: z.enum(['gemini', 'openai', 'mock']).optional(),
+  model: z.string().optional(),
   prompt: z.string().trim().min(1).max(2000),
   aspectRatio: z.enum(['16:9', '9:16', '1:1', '4:3', '3:4']).optional().default('16:9'),
   resolution: z.enum(['1K', '2K', '4K']).optional().default('1K'),
@@ -65,34 +68,11 @@ generationRouter.post('/scenes/:sceneId/generate-image', async (req: AuthRequest
     const owned = await getOwnedScene(req.params.sceneId, req.dbUser!.id);
     if (!owned) return res.status(404).json({ success: false, message: 'Scene not found.' });
 
-    let refBase64 = parsed.data.referenceImageBase64;
-    let refMime = parsed.data.referenceImageMimeType;
-
-    if (!refBase64 && parsed.data.referenceAssetId) {
-      const refAsset = await readAssetAsBase64(parsed.data.referenceAssetId);
-      if (refAsset) {
-        refBase64 = refAsset.base64;
-        refMime = refAsset.mimeType;
-      }
-    }
-
-    const result = await enqueueMediaGenerationJob({
+    const result = await queueSceneImageGeneration({
       projectId: owned.project.id,
       sceneId: owned.scene.id,
       userId: req.dbUser!.id,
-      idempotencyKey: parsed.data.idempotencyKey,
-      request: {
-        mediaType: 'image',
-        provider: parsed.data.provider,
-        model: parsed.data.provider === 'mock' ? 'mock-image-v1' : parsed.data.model,
-        prompt: parsed.data.prompt,
-        aspectRatio: parsed.data.aspectRatio,
-        resolution: parsed.data.resolution,
-        style: parsed.data.style,
-        useSearchGrounding: parsed.data.useSearchGrounding,
-        referenceImageBase64: refBase64,
-        referenceImageMimeType: refMime,
-      },
+      ...parsed.data,
     });
 
     res.status(202).json({
@@ -101,19 +81,24 @@ generationRouter.post('/scenes/:sceneId/generate-image', async (req: AuthRequest
       data: {
         job_id: result.job.id,
         action_id: result.action.id,
+        provider: result.action.provider,
         status: result.job.status,
+        progress: result.job.progress,
         status_url: `/api/v1/jobs/${result.job.id}`,
       },
     });
   } catch (error: unknown) {
     console.error('Enqueue image generation error:', error);
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
     const msg = error instanceof Error ? error.message : 'Failed to queue image generation.';
     res.status(400).json({ success: false, message: msg });
   }
 });
 
 const videoGenSchema = z.object({
-  provider: z.enum(['gemini', 'mock']).optional().default('gemini'),
+  provider: z.enum(['gemini', 'openai', 'mock']).optional(),
   prompt: z.string().trim().min(1).max(2000),
   aspectRatio: z.enum(['16:9', '9:16']).optional().default('16:9'),
   resolution: z.enum(['360p', '720p', '1080p', '4k']).optional().default('720p'),
@@ -135,34 +120,11 @@ generationRouter.post('/scenes/:sceneId/generate-video', async (req: AuthRequest
     const owned = await getOwnedScene(req.params.sceneId, req.dbUser!.id);
     if (!owned) return res.status(404).json({ success: false, message: 'Scene not found.' });
 
-    let refBase64 = parsed.data.referenceImageBase64;
-    let refMime = parsed.data.referenceImageMimeType;
-
-    if (!refBase64 && parsed.data.referenceAssetId) {
-      const refAsset = await readAssetAsBase64(parsed.data.referenceAssetId);
-      if (refAsset && refAsset.mimeType.startsWith('image/')) {
-        refBase64 = refAsset.base64;
-        refMime = refAsset.mimeType;
-      }
-    }
-
-    const result = await enqueueMediaGenerationJob({
+    const result = await queueSceneVideoGeneration({
       projectId: owned.project.id,
       sceneId: owned.scene.id,
       userId: req.dbUser!.id,
-      idempotencyKey: parsed.data.idempotencyKey,
-      request: {
-        mediaType: 'video',
-        provider: parsed.data.provider,
-        model: parsed.data.provider === 'mock' ? 'mock-video-v1' : 'gemini-omni-1.2-flash',
-        prompt: parsed.data.prompt,
-        aspectRatio: parsed.data.aspectRatio,
-        resolution: parsed.data.resolution,
-        style: parsed.data.style,
-        durationSec: parsed.data.durationSec,
-        referenceImageBase64: refBase64,
-        referenceImageMimeType: refMime,
-      },
+      ...parsed.data,
     });
 
     res.status(202).json({
@@ -171,12 +133,17 @@ generationRouter.post('/scenes/:sceneId/generate-video', async (req: AuthRequest
       data: {
         job_id: result.job.id,
         action_id: result.action.id,
+        provider: result.action.provider,
         status: result.job.status,
+        progress: result.job.progress,
         status_url: `/api/v1/jobs/${result.job.id}`,
       },
     });
   } catch (error: unknown) {
     console.error('Enqueue video generation error:', error);
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
     const msg = error instanceof Error ? error.message : 'Failed to queue video generation.';
     res.status(400).json({ success: false, message: msg });
   }
@@ -224,6 +191,7 @@ generationRouter.post('/scenes/:sceneId/generate-tts', async (req: AuthRequest, 
         job_id: result.job.id,
         action_id: result.action.id,
         status: result.job.status,
+        progress: result.job.progress,
         status_url: `/api/v1/jobs/${result.job.id}`,
       },
     });
@@ -276,6 +244,7 @@ generationRouter.post('/projects/:projectId/generate-music', async (req: AuthReq
         job_id: result.job.id,
         action_id: result.action.id,
         status: result.job.status,
+        progress: result.job.progress,
         status_url: `/api/v1/jobs/${result.job.id}`,
       },
     });
@@ -291,31 +260,49 @@ generationRouter.post('/scenes/:sceneId/regenerate', async (req: AuthRequest, re
     const owned = await getOwnedScene(req.params.sceneId, req.dbUser!.id);
     if (!owned) return res.status(404).json({ success: false, message: 'Scene not found.' });
 
-    const mediaType = req.body?.mediaType === 'video' ? 'video' : owned.scene.mediaPreference === 'video' ? 'video' : 'image';
-    const provider = req.body?.provider === 'mock' ? 'mock' : 'gemini';
+    const mediaType =
+      req.body?.mediaType === 'video'
+        ? 'video'
+        : req.body?.mediaType === 'image'
+          ? 'image'
+          : owned.scene.mediaPreference === 'video'
+            ? 'video'
+            : 'image';
+
+    const provider =
+      req.body?.provider === 'mock' || req.body?.provider === 'openai' || req.body?.provider === 'gemini'
+        ? req.body.provider
+        : undefined;
+
     const prompt =
       mediaType === 'video'
         ? req.body?.prompt || owned.scene.videoPrompt || owned.scene.visualDescription || owned.scene.title
         : req.body?.prompt || owned.scene.imagePrompt || owned.scene.visualDescription || owned.scene.title;
 
-    const result = await enqueueMediaGenerationJob({
-      projectId: owned.project.id,
-      sceneId: owned.scene.id,
-      userId: req.dbUser!.id,
-      request: {
-        mediaType,
-        provider,
-        model:
-          provider === 'mock'
-            ? `mock-${mediaType}-v1`
-            : mediaType === 'video'
-              ? 'gemini-omni-1.2-flash'
-              : 'gemini-nano-banana-2.1',
-        prompt,
-        aspectRatio: owned.project.aspectRatio === '9:16' ? '9:16' : '16:9',
-        durationSec: owned.scene.durationSec,
-      },
-    });
+    const result =
+      mediaType === 'video'
+        ? await queueSceneVideoGeneration({
+            projectId: owned.project.id,
+            sceneId: owned.scene.id,
+            userId: req.dbUser!.id,
+            provider,
+            prompt,
+            aspectRatio: owned.project.aspectRatio === '9:16' ? '9:16' : '16:9',
+            durationSec: owned.scene.durationSec,
+          })
+        : await queueSceneImageGeneration({
+            projectId: owned.project.id,
+            sceneId: owned.scene.id,
+            userId: req.dbUser!.id,
+            provider,
+            prompt,
+            aspectRatio:
+              owned.project.aspectRatio === '9:16'
+                ? '9:16'
+                : owned.project.aspectRatio === '1:1'
+                  ? '1:1'
+                  : '16:9',
+          });
 
     res.status(202).json({
       success: true,
@@ -323,11 +310,16 @@ generationRouter.post('/scenes/:sceneId/regenerate', async (req: AuthRequest, re
       data: {
         job_id: result.job.id,
         action_id: result.action.id,
+        provider: result.action.provider,
         status: result.job.status,
+        progress: result.job.progress,
         status_url: `/api/v1/jobs/${result.job.id}`,
       },
     });
   } catch (error: unknown) {
+    if (error instanceof AIProviderError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message });
+    }
     const msg = error instanceof Error ? error.message : 'Regeneration failed.';
     res.status(400).json({ success: false, message: msg });
   }
@@ -356,6 +348,7 @@ generationRouter.get('/jobs/:jobId', async (req: AuthRequest, res) => {
         asset = {
           ...aRows[0],
           signedUrl: createSignedMediaUrl(aRows[0].storageKey),
+          downloadUrl: `${createSignedMediaUrl(aRows[0].storageKey)}&download=1`,
         };
       }
     }
@@ -382,14 +375,18 @@ generationRouter.get('/projects/:projectId/jobs', async (req: AuthRequest, res) 
         actionId: generationJobs.actionId,
         sceneId: generationJobs.sceneId,
         status: generationJobs.status,
+        progress: generationJobs.progress,
+        providerJobId: generationJobs.providerJobId,
         attemptCount: generationJobs.attemptCount,
         errorMessage: generationJobs.errorMessage,
         resultAssetId: generationJobs.resultAssetId,
+        startedAt: generationJobs.startedAt,
         createdAt: generationJobs.createdAt,
         completedAt: generationJobs.completedAt,
         mediaType: generationActions.mediaType,
         provider: generationActions.provider,
         model: generationActions.model,
+        actionStatus: generationActions.status,
       })
       .from(generationJobs)
       .innerJoin(generationActions, eq(generationJobs.actionId, generationActions.id))
@@ -421,11 +418,26 @@ generationRouter.post('/jobs/:jobId/retry', async (req: AuthRequest, res) => {
         action_id: prep.action.id,
         attempt_number: prep.attempt.attemptNumber,
         status: prep.job.status,
+        progress: prep.job.progress,
         status_url: `/api/v1/jobs/${prep.job.id}`,
       },
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Retry failed.';
+    res.status(400).json({ success: false, message: msg });
+  }
+});
+
+generationRouter.post('/jobs/:jobId/cancel', async (req: AuthRequest, res) => {
+  try {
+    const updated = await cancelGenerationJob(req.params.jobId, req.dbUser!.id);
+    res.json({
+      success: true,
+      message: 'Generation job cancelled',
+      data: updated,
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Cancel failed.';
     res.status(400).json({ success: false, message: msg });
   }
 });
