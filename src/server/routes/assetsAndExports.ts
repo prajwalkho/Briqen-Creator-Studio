@@ -15,6 +15,7 @@ import {
   verifySignedMediaParams,
 } from '../storage.ts';
 import { acceptAssetForScene, enqueueExportJob } from '../workers/jobWorker.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const assetsAndExportsRouter = Router();
 
@@ -186,6 +187,14 @@ assetsAndExportsRouter.post(
           .where(and(eq(scenes.id, sceneId), eq(scenes.projectId, projRows[0].id)));
       }
 
+      await logUserActivity({
+        userId: req.dbUser!.id,
+        activityType: 'asset_uploaded',
+        description: `Uploaded media asset "${created.fileName}".`,
+        relatedProjectId: projRows[0].id,
+        relatedAssetId: created.id,
+      });
+
       res.status(201).json({
         success: true,
         message: 'Media asset uploaded',
@@ -240,6 +249,13 @@ assetsAndExportsRouter.delete('/assets/:assetId', async (req: AuthRequest, res) 
     await db.delete(assets).where(eq(assets.id, asset.id));
     await deleteObject(asset.storageKey);
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'asset_deleted',
+      description: `Deleted media asset "${asset.fileName}".`,
+      relatedProjectId: asset.projectId,
+    });
+
     res.json({ success: true, message: 'Asset deleted' });
   } catch (error) {
     console.error('Delete asset error:', error);
@@ -276,6 +292,14 @@ assetsAndExportsRouter.post('/projects/:projectId/exports', async (req: AuthRequ
       aspectRatio: project.aspectRatio,
       musicAssetId,
       quality,
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'video_exported',
+      description: `Queued ${quality === 'low' ? 'quick draft ' : ''}video export "${title}".`,
+      relatedProjectId: project.id,
+      metadata: { exportId: result.exportRecord.id, quality, resolution: result.exportRecord.resolution },
     });
 
     res.status(202).json({

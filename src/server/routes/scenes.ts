@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../../db/index.ts';
 import { projects, scenes } from '../../db/schema.ts';
 import { AuthRequest, requireAuth } from '../../middleware/auth.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const scenesRouter = Router();
 scenesRouter.use(requireAuth);
@@ -57,6 +58,13 @@ scenesRouter.post('/projects/:projectId/scenes', async (req: AuthRequest, res) =
       })
       .returning();
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scene_created',
+      description: `Added scene "${created.title}" to "${project.title}".`,
+      relatedProjectId: project.id,
+    });
+
     res.status(201).json({ success: true, message: 'Scene added', data: created });
   } catch (error) {
     console.error('Create scene error:', error);
@@ -101,6 +109,13 @@ scenesRouter.patch('/scenes/:sceneId', async (req: AuthRequest, res) => {
       .set({ ...parsed.data, updatedAt: new Date() })
       .where(eq(scenes.id, existing.id))
       .returning();
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scene_updated',
+      description: `Updated scene "${updated.title}".`,
+      relatedProjectId: project.id,
+    });
 
     res.json({ success: true, message: 'Scene updated', data: updated });
   } catch (error) {
@@ -153,6 +168,13 @@ scenesRouter.post('/scenes/:sceneId/duplicate', async (req: AuthRequest, res) =>
       return dup;
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scene_duplicated',
+      description: `Duplicated scene "${existing.title}".`,
+      relatedProjectId: existing.projectId,
+    });
+
     res.status(201).json({ success: true, message: 'Scene duplicated', data: created });
   } catch (error) {
     console.error('Duplicate scene error:', error);
@@ -179,6 +201,13 @@ scenesRouter.delete('/scenes/:sceneId', async (req: AuthRequest, res) => {
       for (let i = 0; i < remaining.length; i++) {
         await tx.update(scenes).set({ sceneOrder: i }).where(eq(scenes.id, remaining[i].id));
       }
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scene_deleted',
+      description: `Deleted scene "${existing.title}".`,
+      relatedProjectId: existing.projectId,
     });
 
     res.json({ success: true, message: 'Scene deleted' });

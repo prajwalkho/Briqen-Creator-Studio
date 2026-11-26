@@ -3,6 +3,7 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/aut
 import { auth, googleAuthProvider } from '../lib/firebase';
 import { UserPreferences, UserProfile } from '../types/studio';
 import {
+  type DemoQuickLoginOption,
   fetchCurrentUser,
   getAccessToken,
   getAuthConfig,
@@ -25,6 +26,8 @@ interface AuthContextValue {
   isAuthenticated: boolean;
   loading: boolean;
   googleOAuthEnabled: boolean;
+  demoLoginEnabled: boolean;
+  demoAccounts: DemoQuickLoginOption[];
   themePreference: 'light' | 'dark' | 'system';
   theme: 'dark' | 'light';
   toggleTheme: () => void;
@@ -69,6 +72,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [loading, setLoading] = useState(true);
   const [googleOAuthEnabled, setGoogleOAuthEnabled] = useState(true);
+  const [demoLoginEnabled, setDemoLoginEnabled] = useState(false);
+  const [demoAccounts, setDemoAccounts] = useState<DemoQuickLoginOption[]>([]);
   const [themePreference, setThemePreferenceState] = useState<'light' | 'dark' | 'system'>('dark');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
@@ -190,10 +195,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     void getAuthConfig()
       .then((cfg) => {
-        if (active) setGoogleOAuthEnabled(cfg.googleOAuthEnabled);
+        if (active) {
+          setGoogleOAuthEnabled(cfg.googleOAuthEnabled);
+          setDemoLoginEnabled(Boolean(cfg.demoLoginEnabled));
+          setDemoAccounts(Array.isArray(cfg.demoAccounts) ? cfg.demoAccounts : []);
+        }
       })
       .catch(() => {
-        // default stays enabled when firebase-applet-config is present
+        // default stays safe if config request fails
       });
 
     // Silently restore password-based session from HttpOnly refresh cookie
@@ -296,6 +305,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated,
         loading,
         googleOAuthEnabled,
+        demoLoginEnabled,
+        demoAccounts,
         themePreference,
         theme,
         toggleTheme,

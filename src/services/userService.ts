@@ -243,3 +243,126 @@ export async function cancelAccountDeletionRequest(): Promise<{
   });
   return { user: res.data.user, message: res.message };
 }
+
+export interface MyAssetsBundle {
+  assets: Array<{
+    id: string;
+    projectId: string;
+    projectTitle: string | null;
+    sceneId: string | null;
+    assetType: string;
+    mimeType: string;
+    fileName: string;
+    fileSizeBytes: number;
+    width: number | null;
+    height: number | null;
+    durationSec: number | null;
+    provider: string;
+    model: string;
+    promptUsed: string | null;
+    isAccepted: boolean;
+    createdAt: string;
+    signedUrl: string;
+    downloadUrl: string;
+  }>;
+  exports: Array<{
+    id: string;
+    projectId: string;
+    projectTitle: string | null;
+    title: string;
+    format: string;
+    resolution: string;
+    totalDurationSec: number;
+    fileSizeBytes: number | null;
+    status: string;
+    createdAt: string;
+    previewUrl: string | null;
+    downloadUrl: string | null;
+  }>;
+  summary: {
+    assetCount: number;
+    exportCount: number;
+    totalStorageBytes: number;
+  };
+}
+
+export interface MyUsageSummary {
+  creditsBalance: number;
+  creditsSettled: number;
+  creditsReserved: number;
+  creditsRefunded: number;
+  counts: {
+    projects: number;
+    scripts: number;
+    scenes: number;
+    assets: number;
+    exports: number;
+    generations: number;
+  };
+  mediaBreakdown: Array<{ mediaType: string; count: number }>;
+  history: Array<{
+    id: string;
+    projectId: string;
+    projectTitle: string | null;
+    sceneId: string | null;
+    actionType: string;
+    mediaType: string;
+    provider: string;
+    model: string;
+    prompt: string;
+    status: string;
+    createdAt: string;
+    job: {
+      id: string;
+      status: string;
+      progress: number;
+      errorMessage: string | null;
+      attemptCount: number;
+      completedAt: string | null;
+    } | null;
+    billing: {
+      id: string;
+      estimatedCredits: number;
+      actualCredits: number | null;
+      status: 'reserved' | 'settled' | 'refunded';
+      createdAt: string;
+    } | null;
+  }>;
+  transactions: Array<{
+    id: string;
+    actionId: string;
+    provider: string;
+    model: string;
+    mediaType: string;
+    usageUnits: number;
+    estimatedCredits: number;
+    actualCredits: number | null;
+    status: 'reserved' | 'settled' | 'refunded';
+    createdAt: string;
+  }>;
+}
+
+export async function getMyAssetsBundle(assetType = 'all'): Promise<MyAssetsBundle> {
+  const qs = assetType && assetType !== 'all' ? `?assetType=${encodeURIComponent(assetType)}` : '';
+  const res = await apiRequest<{ data: MyAssetsBundle }>(`/users/me/assets${qs}`);
+  return res.data;
+}
+
+export async function getMyUsageSummary(): Promise<MyUsageSummary> {
+  const res = await apiRequest<{ data: MyUsageSummary }>('/users/me/usage');
+  return res.data;
+}
+
+export async function getMyActivityLog(limit = 30): Promise<
+  Array<{
+    id: string;
+    activityType: string;
+    description: string;
+    relatedProjectId: string | null;
+    createdAt: string;
+  }>
+> {
+  const res = await apiRequest<{ data: any[] }>(`/users/me/activity?limit=${limit}`);
+  return res.data;
+}
+

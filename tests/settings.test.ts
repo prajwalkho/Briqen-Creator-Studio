@@ -20,7 +20,7 @@ import {
   hashOpaqueToken,
   REFRESH_COOKIE_NAME,
 } from '../src/server/auth/security.ts';
-import { getObjectPath } from '../src/server/storage.ts';
+import { resolveSafeStoragePath } from '../src/server/storage.ts';
 
 const execFileAsync = promisify(execFile);
 const BASE_URL = 'http://127.0.0.1:3000/api/v1';
@@ -135,9 +135,7 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
     const tokenB = loginB.data.data.accessToken as string;
 
     const userARows = await db.select().from(users).where(eq(users.email, emailA)).limit(1);
-    const userBRows = await db.select().from(users).where(eq(users.email, emailB)).limit(1);
     const userAId = userARows[0].id;
-    const userBId = userBRows[0].id;
 
     // 2. GET /users/me returns user + preferences + notifications without secrets
     const meBundle = await apiFetch('/users/me', { token: tokenA });
@@ -282,7 +280,7 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
     const avatarUrl = avatarUploadRes.data.data.user.avatarUrl as string;
     assert.ok(storageKey && storageKey.endsWith('.webp'));
     assert.ok(avatarUrl.includes('/api/v1/media/signed?'));
-    assert.equal(fs.existsSync(getObjectPath(storageKey)), true);
+    assert.equal(fs.existsSync(resolveSafeStoragePath(storageKey)), true);
 
     const signedImgRes = await fetch(`http://127.0.0.1:3000${avatarUrl}`);
     assert.equal(signedImgRes.status, 200);
@@ -296,7 +294,10 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
     assert.equal(avatarDeleteRes.status, 200);
     assert.equal(avatarDeleteRes.data.data.user.profileImageKey, null);
     assert.equal(avatarDeleteRes.data.data.user.avatarUrl, null);
-    assert.equal(fs.existsSync(getObjectPath(storageKey)), false);
+    assert.equal(fs.existsSync(resolveSafeStoragePath(storageKey)), false);
+
+    const signedAfterDeleteRes = await fetch(`http://127.0.0.1:3000${avatarUrl}`);
+    assert.equal(signedAfterDeleteRes.status, 404);
 
     // 5. Preferences & Notifications persistence
     const prefUpdateRes = await apiFetch('/users/me/preferences', {
@@ -395,6 +396,18 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
       },
     });
     assert.equal(wrongCurrentPwd.status, 400);
+
+    const mismatchPwd = await apiFetch('/users/me/change-password', {
+      method: 'POST',
+      token: tokenA,
+      cookie: cookieA,
+      body: {
+        currentPassword: pwd1,
+        newPassword: pwd2,
+        confirmNewPassword: 'Different!Password99',
+      },
+    });
+    assert.equal(mismatchPwd.status, 400);
 
     const reusePwd = await apiFetch('/users/me/change-password', {
       method: 'POST',
@@ -516,7 +529,7 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
     assert.equal(finalizeDeleteRes.status, 200);
     assert.equal(finalizeDeleteRes.data.data.deactivated, true);
 
-    // Deactivated account token is immediately rejected (401) and login fails
+    // Deactivated account token is immediately rejected (401)
     const postDeleteMe = await apiFetch('/users/me', { token: tokenA });
     assert.equal(postDeleteMe.status, 401);
 
@@ -530,9 +543,5 @@ test('Account Settings & Profile Management end-to-end suite', async () => {
     await db
       .delete(users)
       .where(sql`${users.email} IN (${emailA}, ${emailANew}, ${emailB})`);
-    // Verify cleanup didn't leave orphaned test records
-    void userBIdCheckSafe;
   }
 });
-
-const userBIdCheckSafe = true;

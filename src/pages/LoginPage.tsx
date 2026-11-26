@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { AlertCircle, ArrowRight, CheckCircle2, Eye, EyeOff, Loader2, Lock, Mail } from 'lucide-react';
+import { AlertCircle, ArrowRight, CheckCircle2, Eye, EyeOff, FlaskConical, Loader2, Lock, Mail } from 'lucide-react';
 import { AuthSplitLayout } from '../components/auth/AuthSplitLayout';
 import { useAuth } from '../context/AuthContext';
 import { isValidEmail } from '../utils/passwordStrength';
 
 export const LoginPage: React.FC = () => {
-  const { login, loginWithGoogle, googleOAuthEnabled } = useAuth();
+  const { login, loginWithGoogle, googleOAuthEnabled, demoLoginEnabled, demoAccounts } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const locationState = location.state as {
@@ -24,6 +24,7 @@ export const LoginPage: React.FC = () => {
   const [serverError, setServerError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [googleSubmitting, setGoogleSubmitting] = useState(false);
+  const [selectedDemoRole, setSelectedDemoRole] = useState<string | null>(null);
 
   const validate = () => {
     const nextErrors: { email?: string; password?: string } = {};
@@ -242,6 +243,58 @@ export const LoginPage: React.FC = () => {
               <span>{googleSubmitting ? 'Connecting Google...' : 'Continue with Google'}</span>
             </button>
           </>
+        )}
+
+        {demoLoginEnabled && demoAccounts.length > 0 && (
+          <div
+            data-testid="demo-login-section"
+            className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] dark:bg-amber-500/[0.05] p-3.5 space-y-2.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-amber-800 dark:text-amber-300">
+                <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+                <span>Demo Accounts (Dev / Test)</span>
+              </div>
+              <span className="text-[11px] font-mono text-amber-700/80 dark:text-amber-300/80">
+                Click to fill
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {demoAccounts.map((acc) => {
+                const isSelected = selectedDemoRole === acc.role;
+                return (
+                  <button
+                    key={acc.email}
+                    type="button"
+                    disabled={submitting || googleSubmitting}
+                    onClick={() => {
+                      setEmail(acc.email);
+                      setPassword(acc.password);
+                      setFieldErrors({});
+                      setServerError(null);
+                      setSelectedDemoRole(acc.role);
+                    }}
+                    title={acc.description}
+                    className={`px-2.5 py-2 rounded-lg border text-left transition-colors ${
+                      isSelected
+                        ? 'border-amber-500 bg-amber-500/15 text-slate-900 dark:text-white'
+                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#090D16] hover:border-amber-500/60 text-slate-800 dark:text-slate-200'
+                    }`}
+                  >
+                    <p className="text-xs font-semibold truncate">{acc.label}</p>
+                    <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                      {acc.email}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-amber-800/90 dark:text-amber-300/80">
+              Demo accounts are for development and testing only. Do not use these credentials for production.
+            </p>
+          </div>
         )}
 
         <div className="pt-2 space-y-3 text-center">

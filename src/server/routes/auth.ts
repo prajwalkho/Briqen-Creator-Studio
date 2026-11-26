@@ -15,6 +15,7 @@ import {
 import { getUserByEmail, toPublicUser } from '../../db/users.ts';
 import { requireAuth } from '../../middleware/auth.ts';
 import type { AuthRequest } from '../../middleware/auth.ts';
+import { getUserPermissions } from '../auth/permissions.ts';
 import {
   clearRefreshCookie,
   generateOpaqueToken,
@@ -32,6 +33,8 @@ import {
   verifyPassword,
   verifySameOriginOrCustomHeader,
 } from '../auth/security.ts';
+import { getDemoConfig, getDemoQuickLoginOptions } from '../seeders/demoConfig.ts';
+import { logUserActivity, syncExpiredBanIfNeeded } from '../services/activityService.ts';
 
 export const authRouter = Router();
 
@@ -131,10 +134,13 @@ const verifyEmailSchema = z.object({
 
 // Public auth configuration
 authRouter.get('/config', (_req, res) => {
+  const demoCfg = getDemoConfig();
   res.json({
     success: true,
     data: {
       googleOAuthEnabled: isGoogleOAuthConfigured(),
+      demoLoginEnabled: !demoCfg.isProduction && demoCfg.demoLoginEnabled,
+      demoAccounts: getDemoQuickLoginOptions(),
     },
   });
 });
@@ -189,8 +195,11 @@ authRouter.post('/register', strictAuthLimiter, async (req, res) => {
           displayName: fullName,
           passwordHash,
           passwordChangedAt: new Date(),
+          role: 'user',
+          accountStatus: 'active',
           isActive: true,
           isVerified: false,
+          isDemoAccount: false,
         })
         .returning();
 
@@ -209,6 +218,13 @@ authRouter.post('/register', strictAuthLimiter, async (req, res) => {
         message: 'An account with this email address already exists.',
       });
     }
+
+    await logUserActivity({
+      userId: createdUser.id,
+      activityType: 'registration',
+      description: 'Registered a new Briqen Creator Studio account.',
+      metadata: { ipAddress: req.ip || null },
+    });
 
     if (process.env.NODE_ENV !== 'production') {
       const origin = process.env.APP_URL || `${req.protocol}://${req.get('Host') || 'localhost:3000'}`;
@@ -247,20 +263,42 @@ authRouter.post('/login', strictAuthLimiter, async (req, res) => {
   const normalizedEmail = email.toLowerCase();
 
   try {
-    const user = await getUserByEmail(normalizedEmail);
-    const passwordMatches = await verifyPassword(password, user?.passwordHash ?? null);
+    const rawUser = await getUserByEmail(normalizedEmail);
+    const passwordMatches = await verifyPassword(password, rawUser?.passwordHash ?? null);
 
-    if (!user || !passwordMatches) {
+    if (!rawUser || !passwordMatches) {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password.',
       });
     }
 
-    if (!user.isActive) {
+    if (rawUser.deletedAt !== null) {
       return res.status(403).json({
         success: false,
-        message: 'Your account is currently disabled. Please contact support.',
+        code: 'ACCOUNT_RESTRICTED',
+        message: 'This account has been deactivated or deleted. Please contact an administrator.',
+      });
+    }
+
+    const user = await syncExpiredBanIfNeeded(rawUser);
+
+    if (user.accountStatus === 'banned') {
+      const expiryNote = user.banExpiresAt
+        ? ` Ban expires on ${user.banExpiresAt.toLocaleString()}.`
+        : ' This ban is permanent.';
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_RESTRICTED',
+        message: `Your account has been banned${user.banReason ? `: ${user.banReason}` : '.'}${expiryNote}`,
+      });
+    }
+
+    if (user.accountStatus === 'suspended' || !user.isActive || user.accountStatus !== 'active') {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_RESTRICTED',
+        message: 'Your account is currently suspended or disabled. Please contact support.',
       });
     }
 
@@ -291,7 +329,23 @@ authRouter.post('/login', strictAuthLimiter, async (req, res) => {
       return u;
     });
 
-    const { token: accessToken, expiresIn } = signAccessToken(updatedUser);
+    await logUserActivity({
+      userId: updatedUser.id,
+      activityType: 'login',
+      description: updatedUser.isDemoAccount
+        ? `Signed in via demo account (${updatedUser.email}).`
+        : 'Signed into Briqen Creator Studio.',
+      metadata: {
+        rememberMe,
+        isDemo: updatedUser.isDemoAccount,
+        ipAddress: req.ip || null,
+      },
+    });
+
+    const [{ token: accessToken, expiresIn }, resolvedPerms] = await Promise.all([
+      Promise.resolve(signAccessToken(updatedUser)),
+      getUserPermissions(updatedUser.id, updatedUser.role),
+    ]);
     setRefreshCookie(res, rawRefresh, ttlMs);
 
     return res.json({
@@ -300,7 +354,7 @@ authRouter.post('/login', strictAuthLimiter, async (req, res) => {
       data: {
         accessToken,
         expiresIn,
-        user: toPublicUser(updatedUser),
+        user: toPublicUser(updatedUser, resolvedPerms),
       },
     });
   } catch (error) {
@@ -367,8 +421,12 @@ authRouter.post('/refresh', refreshRateLimiter, async (req, res) => {
         .from(users)
         .where(eq(users.id, currentToken.userId))
         .limit(1);
-      const user = userRows[0];
-      if (!user || !user.isActive) {
+      const rawUser = userRows[0];
+      if (!rawUser || rawUser.deletedAt !== null) {
+        return { ok: false as const, reason: 'inactive' as const };
+      }
+      const user = await syncExpiredBanIfNeeded(rawUser);
+      if (!user.isActive || user.accountStatus !== 'active') {
         return { ok: false as const, reason: 'inactive' as const };
       }
 
@@ -415,7 +473,10 @@ authRouter.post('/refresh', refreshRateLimiter, async (req, res) => {
       });
     }
 
-    const { token: accessToken, expiresIn } = signAccessToken(result.user);
+    const [{ token: accessToken, expiresIn }, resolvedPerms] = await Promise.all([
+      Promise.resolve(signAccessToken(result.user)),
+      getUserPermissions(result.user.id, result.user.role),
+    ]);
     setRefreshCookie(res, result.nextRawToken, result.ttlMs);
 
     return res.json({
@@ -423,7 +484,7 @@ authRouter.post('/refresh', refreshRateLimiter, async (req, res) => {
       data: {
         accessToken,
         expiresIn,
-        user: toPublicUser(result.user),
+        user: toPublicUser(result.user, resolvedPerms),
       },
     });
   } catch (error) {
@@ -460,6 +521,11 @@ authRouter.post('/logout', async (req, res) => {
           .update(refreshTokens)
           .set({ revokedAt: new Date() })
           .where(and(eq(refreshTokens.familyId, rows[0].familyId), isNull(refreshTokens.revokedAt)));
+        await logUserActivity({
+          userId: rows[0].userId,
+          activityType: 'logout',
+          description: 'Signed out of workspace session.',
+        });
       }
     } catch (error) {
       console.error('Logout revocation error:', error);
@@ -597,6 +663,12 @@ authRouter.post('/reset-password', strictAuthLimiter, async (req, res) => {
       });
     }
 
+    await logUserActivity({
+      userId: updated.userId,
+      activityType: 'password_reset',
+      description: 'Completed password reset using recovery token.',
+    });
+
     clearRefreshCookie(res);
     return res.json({
       success: true,
@@ -660,7 +732,7 @@ authRouter.post('/verify-email', strictAuthLimiter, async (req, res) => {
             updatedAt: now,
           })
           .where(eq(users.id, consumed.userId));
-        return { status: 'email_changed' as const };
+        return { status: 'email_changed' as const, userId: consumed.userId };
       }
 
       await tx
@@ -668,7 +740,7 @@ authRouter.post('/verify-email', strictAuthLimiter, async (req, res) => {
         .set({ isVerified: true, updatedAt: now })
         .where(eq(users.id, consumed.userId));
 
-      return { status: 'verified' as const };
+      return { status: 'verified' as const, userId: consumed.userId };
     });
 
     if (verified.status === 'invalid') {
@@ -684,6 +756,15 @@ authRouter.post('/verify-email', strictAuthLimiter, async (req, res) => {
         message: 'That email address is already registered to another account.',
       });
     }
+
+    await logUserActivity({
+      userId: verified.userId,
+      activityType: 'email_verified',
+      description:
+        verified.status === 'email_changed'
+          ? 'Verified and updated primary email address.'
+          : 'Verified primary email address.',
+    });
 
     return res.json({
       success: true,

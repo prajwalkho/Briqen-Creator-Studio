@@ -26,6 +26,7 @@ import {
   type MediaGenerationRequest,
 } from '../providers/mediaProvider.ts';
 import { createSignedMediaUrl, readObjectBuffer, resolveSafeStoragePath, saveObject } from '../storage.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -843,6 +844,21 @@ async function executeGenerationAttempt(
           })
           .where(eq(projects.id, freshJob.projectId));
       }
+
+      return { userId: freshJob.userId, projectId: freshJob.projectId, assetId: asset.id, fileName };
+    });
+
+    await logUserActivity({
+      userId: job.userId,
+      activityType:
+        request.mediaType === 'image'
+          ? 'image_generated'
+          : request.mediaType === 'video'
+            ? 'video_generated'
+            : 'audio_generated',
+      description: `Completed ${request.mediaType} generation using ${request.provider}.`,
+      relatedProjectId: job.projectId,
+      metadata: { jobId, provider: request.provider, model: request.model },
     });
   } catch (error: unknown) {
     const durationMs = Date.now() - startedAtMs;
@@ -913,6 +929,21 @@ async function executeGenerationAttempt(
         }
       }
     });
+
+    const jobRowForLog = await db
+      .select({ userId: generationJobs.userId, projectId: generationJobs.projectId })
+      .from(generationJobs)
+      .where(eq(generationJobs.id, jobId))
+      .limit(1);
+    if (jobRowForLog[0]) {
+      await logUserActivity({
+        userId: jobRowForLog[0].userId,
+        activityType: 'generation_failed',
+        description: `${request.mediaType} generation ${isTimeout ? 'timed out' : 'failed'}: ${message}`,
+        relatedProjectId: jobRowForLog[0].projectId,
+        metadata: { jobId, provider: request.provider },
+      });
+    }
   }
 }
 
@@ -1238,6 +1269,14 @@ async function processExportJob(exportId: string) {
         .set({ status: 'completed', updatedAt: new Date() })
         .where(eq(projects.id, exp.projectId));
     });
+
+    await logUserActivity({
+      userId: exp.userId,
+      activityType: 'export_completed',
+      description: `Completed FFmpeg render for "${exp.title}" (${exp.resolution}).`,
+      relatedProjectId: exp.projectId,
+      metadata: { exportId, resolution: exp.resolution, fileSizeBytes: sizeBytes },
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'FFmpeg export failed.';
     console.error(`Export job ${exportId} failed:`, error);
@@ -1260,6 +1299,13 @@ async function processExportJob(exportId: string) {
         .update(projects)
         .set({ status: 'failed', updatedAt: new Date() })
         .where(eq(projects.id, expRows[0].projectId));
+      await logUserActivity({
+        userId: expRows[0].userId,
+        activityType: 'export_failed',
+        description: `FFmpeg export "${expRows[0].title}" failed: ${message}`,
+        relatedProjectId: expRows[0].projectId,
+        metadata: { exportId },
+      });
     }
   } finally {
     await fs.promises.rm(tmpDir, { recursive: true, force: true });

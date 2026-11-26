@@ -12,7 +12,10 @@ import { generationRouter } from './src/server/routes/generation.ts';
 import { assetsAndExportsRouter } from './src/server/routes/assetsAndExports.ts';
 import { aiRouter } from './src/server/routes/ai.ts';
 import { usersRouter } from './src/server/routes/users.ts';
+import { adminRouter } from './src/server/routes/admin.ts';
+import { ownerRouter } from './src/server/routes/owner.ts';
 import { validateStartupAIConfig } from './src/server/ai/config.ts';
+import { assertDemoModeSafeOnStartup } from './src/server/seeders/demoConfig.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const isProd = process.env.NODE_ENV === 'production';
@@ -61,6 +64,7 @@ function apiRateLimiter(req: Request, res: Response, next: NextFunction) {
 }
 
 async function startServer() {
+  assertDemoModeSafeOnStartup();
   validateStartupAIConfig();
   const app = express();
   app.set('trust proxy', 1);
@@ -105,6 +109,8 @@ async function startServer() {
 
   app.use('/api/v1', apiRateLimiter);
   app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1/admin', adminRouter);
+  app.use('/api/v1/owner', ownerRouter);
   app.use('/api/v1', assetsAndExportsRouter);
   app.use('/api/v1', projectsRouter);
   app.use('/api/v1', scriptsRouter);
@@ -128,12 +134,17 @@ async function startServer() {
   });
 
   if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    const vitePromise = import('vite').then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      })
+    );
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      vitePromise
+        .then((vite) => vite.middlewares(req, res, next))
+        .catch(next);
     });
-    app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distDir));

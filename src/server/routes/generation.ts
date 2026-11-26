@@ -22,6 +22,7 @@ import {
   enqueueMediaGenerationJob,
   retryGenerationJob,
 } from '../workers/jobWorker.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const generationRouter = Router();
 generationRouter.use(requireAuth);
@@ -75,6 +76,16 @@ generationRouter.post('/scenes/:sceneId/generate-image', async (req: AuthRequest
       ...parsed.data,
     });
 
+    if (!result.isDuplicate) {
+      await logUserActivity({
+        userId: req.dbUser!.id,
+        activityType: 'image_generation_queued',
+        description: `Queued image generation for scene "${owned.scene.title}".`,
+        relatedProjectId: owned.project.id,
+        metadata: { provider: result.action.provider, jobId: result.job.id },
+      });
+    }
+
     res.status(202).json({
       success: true,
       message: result.isDuplicate ? 'Existing generation job returned' : 'Image generation job created',
@@ -126,6 +137,16 @@ generationRouter.post('/scenes/:sceneId/generate-video', async (req: AuthRequest
       userId: req.dbUser!.id,
       ...parsed.data,
     });
+
+    if (!result.isDuplicate) {
+      await logUserActivity({
+        userId: req.dbUser!.id,
+        activityType: 'video_generation_queued',
+        description: `Queued video generation for scene "${owned.scene.title}".`,
+        relatedProjectId: owned.project.id,
+        metadata: { provider: result.action.provider, jobId: result.job.id },
+      });
+    }
 
     res.status(202).json({
       success: true,
@@ -184,6 +205,14 @@ generationRouter.post('/scenes/:sceneId/generate-tts', async (req: AuthRequest, 
       },
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'tts_generation_queued',
+      description: `Queued TTS voiceover for scene "${owned.scene.title}".`,
+      relatedProjectId: owned.project.id,
+      metadata: { jobId: result.job.id },
+    });
+
     res.status(202).json({
       success: true,
       message: 'Voiceover generation job created',
@@ -235,6 +264,14 @@ generationRouter.post('/projects/:projectId/generate-music', async (req: AuthReq
         referenceImageBase64: parsed.data.referenceImageBase64,
         referenceImageMimeType: parsed.data.referenceImageMimeType,
       },
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'music_generation_queued',
+      description: `Queued background music generation for "${projRows[0].title}".`,
+      relatedProjectId: projRows[0].id,
+      metadata: { jobId: result.job.id },
     });
 
     res.status(202).json({
@@ -303,6 +340,14 @@ generationRouter.post('/scenes/:sceneId/regenerate', async (req: AuthRequest, re
                   ? '1:1'
                   : '16:9',
           });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scene_regenerated',
+      description: `Triggered deliberate ${mediaType} regeneration for scene "${owned.scene.title}".`,
+      relatedProjectId: owned.project.id,
+      metadata: { mediaType, actionId: result.action.id, jobId: result.job.id },
+    });
 
     res.status(202).json({
       success: true,

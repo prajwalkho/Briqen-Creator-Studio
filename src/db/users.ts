@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
+import { normalizeRole } from '../server/auth/rbac.ts';
 import { createSignedMediaUrl } from '../server/storage.ts';
 import { db } from './index.ts';
 import { notificationPreferences, userPreferences, users } from './schema.ts';
@@ -27,22 +28,36 @@ export interface PublicUser {
   githubUrl: string | null;
   creditsBalance: number;
   role: string;
+  permissions?: string[];
+  accountStatus: string;
+  banReason: string | null;
+  banExpiresAt: Date | null;
+  bannedAt: Date | null;
   isActive: boolean;
   isVerified: boolean;
+  isDemoAccount: boolean;
   hasLocalPassword: boolean;
   passwordChangedAt: Date | null;
   lastLoginAt: Date | null;
   deletionRequestedAt: Date | null;
   deletionScheduledFor: Date | null;
   deletionReason: string | null;
+  deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export function toPublicUser(user: UserRow): PublicUser {
+export function toPublicUser(user: UserRow, resolvedPermissions?: string[]): PublicUser {
   const resolvedAvatarUrl = user.profileImageKey
     ? createSignedMediaUrl(user.profileImageKey, 3600 * 24)
     : user.avatarUrl ?? null;
+
+  const derivedStatus =
+    user.deletedAt !== null
+      ? user.accountStatus === 'deactivated'
+        ? 'deactivated'
+        : 'deleted'
+      : user.accountStatus || (user.isActive ? 'active' : 'suspended');
 
   return {
     id: user.id,
@@ -63,15 +78,22 @@ export function toPublicUser(user: UserRow): PublicUser {
     linkedinUrl: user.linkedinUrl ?? null,
     githubUrl: user.githubUrl ?? null,
     creditsBalance: user.creditsBalance,
-    role: user.role,
+    role: normalizeRole(user.role),
+    ...(resolvedPermissions ? { permissions: resolvedPermissions } : {}),
+    accountStatus: derivedStatus,
+    banReason: user.banReason ?? null,
+    banExpiresAt: user.banExpiresAt ?? null,
+    bannedAt: user.bannedAt ?? null,
     isActive: user.isActive,
     isVerified: user.isVerified,
+    isDemoAccount: Boolean(user.isDemoAccount),
     hasLocalPassword: Boolean(user.passwordHash),
     passwordChangedAt: user.passwordChangedAt ?? null,
     lastLoginAt: user.lastLoginAt ?? null,
     deletionRequestedAt: user.deletionRequestedAt ?? null,
     deletionScheduledFor: user.deletionScheduledFor ?? null,
     deletionReason: user.deletionReason ?? null,
+    deletedAt: user.deletedAt ?? null,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };

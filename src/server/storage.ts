@@ -2,7 +2,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-const STORAGE_ROOT = path.resolve(process.cwd(), process.env.OBJECT_STORAGE_DIR || './storage/objects');
+const rawStorageDir = (process.env.OBJECT_STORAGE_DIR || '').trim();
+const safeStorageDir =
+  rawStorageDir && !/^(AIza|sk-)[0-9A-Za-z_-]{16,}$/.test(rawStorageDir)
+    ? rawStorageDir
+    : './storage/objects';
+const STORAGE_ROOT = path.resolve(process.cwd(), safeStorageDir);
 const SIGNING_SECRET = process.env.MEDIA_SIGNING_SECRET || crypto.randomBytes(32).toString('hex');
 
 if (!fs.existsSync(STORAGE_ROOT)) {

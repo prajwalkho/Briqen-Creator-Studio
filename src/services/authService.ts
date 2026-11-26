@@ -13,8 +13,18 @@ export interface AuthSessionResponse {
   user: UserProfile;
 }
 
+export interface DemoQuickLoginOption {
+  label: string;
+  role: 'super_admin' | 'admin' | 'user';
+  email: string;
+  password: string;
+  description: string;
+}
+
 export interface AuthConfigResponse {
   googleOAuthEnabled: boolean;
+  demoLoginEnabled: boolean;
+  demoAccounts: DemoQuickLoginOption[];
 }
 
 export function getAccessToken(): string | null {

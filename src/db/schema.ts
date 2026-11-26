@@ -33,10 +33,17 @@ export const users = pgTable(
     githubUrl: text('github_url'),
     isActive: boolean('is_active').default(true).notNull(),
     isVerified: boolean('is_verified').default(false).notNull(),
+    isDemoAccount: boolean('is_demo_account').default(false).notNull(),
     displayName: text('display_name'),
     avatarUrl: text('avatar_url'),
     creditsBalance: integer('credits_balance').default(1000).notNull(),
-    role: text('role').default('creator').notNull(),
+    role: text('role').default('creator').notNull(), // user | creator | moderator | admin | super_admin
+    accountStatus: text('account_status').default('active').notNull(), // active | banned | suspended | deleted | deactivated
+    banReason: text('ban_reason'),
+    banExpiresAt: timestamp('ban_expires_at'),
+    bannedAt: timestamp('banned_at'),
+    bannedBy: uuid('banned_by'),
+    createdByAdminId: uuid('created_by_admin_id'),
     tokenVersion: integer('token_version').default(1).notNull(),
     passwordChangedAt: timestamp('password_changed_at'),
     lastLoginAt: timestamp('last_login_at'),
@@ -50,6 +57,8 @@ export const users = pgTable(
   (table) => [
     index('users_email_idx').on(table.email),
     uniqueIndex('users_username_uidx').on(table.username),
+    index('users_role_status_idx').on(table.role, table.accountStatus),
+    index('users_demo_idx').on(table.isDemoAccount),
   ]
 );
 
@@ -450,6 +459,120 @@ export const billingTransactions = pgTable(
   (table) => [index('billing_user_idx').on(table.userId)]
 );
 
+// 12. User Ban & Unban History
+export const userBanHistory = pgTable(
+  'user_ban_history',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    action: text('action').notNull(), // ban | unban | suspend | restore
+    banType: text('ban_type'), // temporary | permanent
+    reason: text('reason').notNull(),
+    internalNote: text('internal_note'),
+    performedBy: uuid('performed_by').references(() => users.id, { onDelete: 'set null' }),
+    expiresAt: timestamp('expires_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('user_ban_history_user_idx').on(table.userId),
+    index('user_ban_history_created_idx').on(table.createdAt),
+  ]
+);
+
+// 13. Immutable Admin Audit Logs
+export const adminAuditLogs = pgTable(
+  'admin_audit_logs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    adminId: uuid('admin_id').references(() => users.id, { onDelete: 'set null' }),
+    targetUserId: uuid('target_user_id').references(() => users.id, { onDelete: 'set null' }),
+    action: text('action').notNull(),
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id'),
+    outcome: text('outcome').default('success').notNull(), // success | denied | failed
+    previousValues: jsonb('previous_values').$type<Record<string, unknown> | null>(),
+    newValues: jsonb('new_values').$type<Record<string, unknown> | null>(),
+    ipAddress: text('ip_address'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('admin_audit_admin_idx').on(table.adminId),
+    index('admin_audit_target_idx').on(table.targetUserId),
+    index('admin_audit_created_idx').on(table.createdAt),
+  ]
+);
+
+// 14. User Activity Timeline
+export const userActivities = pgTable(
+  'user_activities',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    activityType: text('activity_type').notNull(),
+    description: text('description').notNull(),
+    relatedProjectId: uuid('related_project_id').references(() => projects.id, {
+      onDelete: 'set null',
+    }),
+    relatedAssetId: uuid('related_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    metadata: jsonb('metadata').$type<Record<string, unknown> | null>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('user_activities_user_idx').on(table.userId),
+    index('user_activities_type_idx').on(table.activityType),
+    index('user_activities_created_idx').on(table.createdAt),
+  ]
+);
+
+// 15. Granular RBAC Permissions Catalog
+export const permissions = pgTable(
+  'permissions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    name: text('name').notNull().unique(),
+    category: text('category').notNull(),
+    description: text('description').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [index('permissions_category_idx').on(table.category)]
+);
+
+// 16. Admin Permission Assignments (Super Admin grants/revokes per Admin)
+export const adminPermissions = pgTable(
+  'admin_permissions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    adminUserId: uuid('admin_user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    permissionId: uuid('permission_id')
+      .references(() => permissions.id, { onDelete: 'cascade' })
+      .notNull(),
+    grantedBy: uuid('granted_by').references(() => users.id, { onDelete: 'set null' }),
+    scopeJson: jsonb('scope_json').$type<Record<string, unknown> | null>(),
+    grantedAt: timestamp('granted_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('admin_permissions_user_perm_uidx').on(table.adminUserId, table.permissionId),
+    index('admin_permissions_user_idx').on(table.adminUserId),
+    index('admin_permissions_perm_idx').on(table.permissionId),
+  ]
+);
+
+// 17. Platform Configuration Settings (Super Admin managed)
+export const platformSettings = pgTable('platform_settings', {
+  key: text('key').primaryKey(),
+  valueJson: jsonb('value_json').$type<Record<string, unknown>>().notNull(),
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   projects: many(projects),
@@ -458,6 +581,9 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   refreshTokens: many(refreshTokens),
   passwordResetTokens: many(passwordResetTokens),
   emailVerificationTokens: many(emailVerificationTokens),
+  banHistory: many(userBanHistory),
+  activities: many(userActivities),
+  adminPermissions: many(adminPermissions, { relationName: 'adminUserPermissions' }),
   preferences: one(userPreferences, {
     fields: [users.id],
     references: [userPreferences.userId],
@@ -466,6 +592,30 @@ export const usersRelations = relations(users, ({ one, many }) => ({
     fields: [users.id],
     references: [notificationPreferences.userId],
   }),
+}));
+
+export const permissionsRelations = relations(permissions, ({ many }) => ({
+  assignments: many(adminPermissions),
+}));
+
+export const adminPermissionsRelations = relations(adminPermissions, ({ one }) => ({
+  adminUser: one(users, {
+    fields: [adminPermissions.adminUserId],
+    references: [users.id],
+    relationName: 'adminUserPermissions',
+  }),
+  permission: one(permissions, {
+    fields: [adminPermissions.permissionId],
+    references: [permissions.id],
+  }),
+}));
+
+export const userBanHistoryRelations = relations(userBanHistory, ({ one }) => ({
+  user: one(users, { fields: [userBanHistory.userId], references: [users.id] }),
+}));
+
+export const userActivitiesRelations = relations(userActivities, ({ one }) => ({
+  user: one(users, { fields: [userActivities.userId], references: [users.id] }),
 }));
 
 export const userPreferencesRelations = relations(userPreferences, ({ one }) => ({

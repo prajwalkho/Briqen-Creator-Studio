@@ -18,14 +18,21 @@ export interface UserProfile {
   githubUrl?: string | null;
   creditsBalance: number;
   role: string;
+  permissions?: string[];
+  accountStatus?: string;
+  banReason?: string | null;
+  banExpiresAt?: string | null;
+  bannedAt?: string | null;
   isActive?: boolean;
   isVerified?: boolean;
+  isDemoAccount?: boolean;
   hasLocalPassword?: boolean;
   passwordChangedAt?: string | null;
   lastLoginAt?: string | null;
   deletionRequestedAt?: string | null;
   deletionScheduledFor?: string | null;
   deletionReason?: string | null;
+  deletedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }

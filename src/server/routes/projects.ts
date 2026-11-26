@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../../db/index.ts';
 import { billingTransactions, generationJobs, projects, scriptRevisions } from '../../db/schema.ts';
 import { AuthRequest, requireAuth } from '../../middleware/auth.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const projectsRouter = Router();
 
@@ -120,6 +121,14 @@ projectsRouter.post('/projects', async (req: AuthRequest, res) => {
       return proj;
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'project_created',
+      description: `Created project "${created.title}".`,
+      relatedProjectId: created.id,
+      metadata: { platform: created.platform, aspectRatio: created.aspectRatio },
+    });
+
     res.status(201).json({
       success: true,
       message: 'Project created',
@@ -233,6 +242,13 @@ projectsRouter.patch('/projects/:projectId', async (req: AuthRequest, res) => {
       return res.status(404).json({ success: false, message: 'Project not found.' });
     }
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'project_updated',
+      description: `Updated project settings for "${updated[0].title}".`,
+      relatedProjectId: updated[0].id,
+    });
+
     res.json({ success: true, message: 'Project updated', data: updated[0] });
   } catch (error) {
     console.error('Update project error:', error);
@@ -251,6 +267,12 @@ projectsRouter.delete('/projects/:projectId', async (req: AuthRequest, res) => {
     if (!deleted[0]) {
       return res.status(404).json({ success: false, message: 'Project not found.' });
     }
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'project_deleted',
+      description: `Deleted project "${deleted[0].title}".`,
+    });
 
     res.json({ success: true, message: 'Project deleted' });
   } catch (error) {

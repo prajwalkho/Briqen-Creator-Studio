@@ -31,6 +31,7 @@ import {
   rejectAssetForScene,
   retryGenerationJob,
 } from '../workers/jobWorker.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const aiRouter = Router();
 aiRouter.use(requireAuth);
@@ -109,6 +110,14 @@ aiRouter.post('/ai/scripts/generate', async (req: AuthRequest, res) => {
       provider: parsed.data.provider,
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_generated',
+      description: `Generated script revision v${result.revision.versionNumber} using ${result.provider}.`,
+      relatedProjectId: project.id,
+      metadata: { provider: result.provider, isMock: result.isMock },
+    });
+
     res.status(201).json({
       success: true,
       message: `Generated script revision v${result.revision.versionNumber} (${result.provider}${result.isMock ? ' - mock mode' : ''})`,
@@ -151,6 +160,14 @@ aiRouter.post('/ai/scripts/:scriptId/improve', async (req: AuthRequest, res) => 
       userUid: req.dbUser!.uid,
       baseRevision: baseRev,
       ...parsed.data,
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_improved',
+      description: `Improved script revision v${baseRev.versionNumber} into v${result.revision.versionNumber}.`,
+      relatedProjectId: project.id,
+      metadata: { action: parsed.data.action, provider: result.provider },
     });
 
     res.status(201).json({
@@ -241,6 +258,14 @@ aiRouter.post('/ai/scenes/extract', async (req: AuthRequest, res) => {
       provider: parsed.data.provider,
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scenes_extracted',
+      description: `Extracted ${result.scenes.length} structured scenes using ${result.modelUsed}.`,
+      relatedProjectId: project.id,
+      metadata: { sceneCount: result.scenes.length, provider: result.provider },
+    });
+
     res.status(201).json({
       success: true,
       message: `Extracted ${result.scenes.length} structured scenes using ${result.modelUsed}`,
@@ -325,6 +350,16 @@ aiRouter.post('/ai/images/generate', async (req: AuthRequest, res) => {
       idempotencyKey: parsed.data.idempotencyKey,
     });
 
+    if (!result.isDuplicate) {
+      await logUserActivity({
+        userId: req.dbUser!.id,
+        activityType: 'image_generation_queued',
+        description: `Queued image generation for scene "${owned.scene.title}".`,
+        relatedProjectId: owned.project.id,
+        metadata: { provider: result.action.provider, jobId: result.job.id },
+      });
+    }
+
     res.status(202).json({
       success: true,
       message: result.isDuplicate
@@ -373,6 +408,16 @@ aiRouter.post('/ai/videos/generate', async (req: AuthRequest, res) => {
       referenceImageMimeType: parsed.data.referenceImageMimeType,
       idempotencyKey: parsed.data.idempotencyKey,
     });
+
+    if (!result.isDuplicate) {
+      await logUserActivity({
+        userId: req.dbUser!.id,
+        activityType: 'video_generation_queued',
+        description: `Queued video generation for scene "${owned.scene.title}".`,
+        relatedProjectId: owned.project.id,
+        metadata: { provider: result.action.provider, jobId: result.job.id },
+      });
+    }
 
     res.status(202).json({
       success: true,
@@ -477,6 +522,14 @@ aiRouter.post('/ai/assets/:assetId/accept', async (req: AuthRequest, res) => {
   try {
     const sceneId = typeof req.body?.sceneId === 'string' ? req.body.sceneId : undefined;
     const updated = await acceptAssetForScene(req.params.assetId, req.dbUser!.id, sceneId);
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'asset_accepted',
+      description: `Accepted asset "${updated.fileName}" for scene.`,
+      relatedProjectId: updated.projectId,
+      relatedAssetId: updated.id,
+    });
+
     res.json({
       success: true,
       message: 'Asset accepted for scene',
@@ -494,6 +547,13 @@ aiRouter.post('/ai/assets/:assetId/accept', async (req: AuthRequest, res) => {
 aiRouter.post('/ai/assets/:assetId/reject', async (req: AuthRequest, res) => {
   try {
     const result = await rejectAssetForScene(req.params.assetId, req.dbUser!.id);
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'asset_rejected',
+      description: `Rejected generated asset "${result.asset.fileName}".`,
+      relatedProjectId: result.asset.projectId,
+      relatedAssetId: result.asset.id,
+    });
     res.json({
       success: true,
       message: result.fallbackAssetId

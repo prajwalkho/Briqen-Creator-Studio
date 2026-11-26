@@ -15,11 +15,14 @@ import {
   billingTransactions,
   emailVerificationTokens,
   exportsTable,
+  generationActions,
+  generationJobs,
   notificationPreferences,
   projects,
   refreshTokens,
   scenes,
   scriptRevisions,
+  userActivities,
   userPreferences,
   users,
 } from '../../db/schema.ts';
@@ -46,7 +49,8 @@ import {
   verifyPassword,
   verifySameOriginOrCustomHeader,
 } from '../auth/security.ts';
-import { deleteObject, saveObject } from '../storage.ts';
+import { createSignedMediaUrl, deleteObject, saveObject } from '../storage.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -430,13 +434,21 @@ usersRouter.patch('/users/me', async (req: AuthRequest, res) => {
       );
     }
 
+    await logUserActivity({
+      userId,
+      activityType: 'profile_updated',
+      description: pendingEmailTarget
+        ? `Updated profile and requested email change to ${pendingEmailTarget}.`
+        : 'Updated personal profile information.',
+    });
+
     return res.json({
       success: true,
       message: pendingEmailTarget
         ? `Profile saved. Verification is required to switch your email to ${pendingEmailTarget}.`
         : 'Personal information updated.',
       data: {
-        user: toPublicUser(txOutcome.user),
+        user: toPublicUser(txOutcome.user, req.dbUser?.permissions),
         requiresEmailVerification: Boolean(pendingEmailTarget),
         pendingEmail: pendingEmailTarget,
       },
@@ -543,11 +555,17 @@ usersRouter.post(
         await deleteObject(previousKey);
       }
 
+      await logUserActivity({
+        userId,
+        activityType: 'profile_picture_updated',
+        description: 'Uploaded a new profile picture.',
+      });
+
       return res.json({
         success: true,
         message: 'Profile picture updated.',
         data: {
-          user: toPublicUser(updatedUser),
+          user: toPublicUser(updatedUser, req.dbUser?.permissions),
           sizeBytes: processed.buffer.byteLength,
           mimeType: processed.mimeType,
         },
@@ -584,11 +602,17 @@ usersRouter.delete('/users/me/avatar', async (req: AuthRequest, res) => {
       await deleteObject(oldKey);
     }
 
+    await logUserActivity({
+      userId,
+      activityType: 'profile_picture_removed',
+      description: 'Removed profile picture.',
+    });
+
     return res.json({
       success: true,
       message: 'Profile picture removed.',
       data: {
-        user: toPublicUser(updatedUser),
+        user: toPublicUser(updatedUser, req.dbUser?.permissions),
       },
     });
   } catch (error) {
@@ -708,6 +732,12 @@ usersRouter.post('/users/me/change-password', sensitiveActionLimiter, async (req
       return savedUser;
     });
 
+    await logUserActivity({
+      userId: userRow.id,
+      activityType: 'password_change',
+      description: 'Changed account password and revoked other active sessions.',
+    });
+
     const { token: accessToken, expiresIn } = signAccessToken(updatedUser);
     if (rotatedRawRefresh) {
       setRefreshCookie(res, rotatedRawRefresh, rotatedTtlMs);
@@ -719,7 +749,7 @@ usersRouter.post('/users/me/change-password', sensitiveActionLimiter, async (req
       data: {
         accessToken,
         expiresIn,
-        user: toPublicUser(updatedUser),
+        user: toPublicUser(updatedUser, req.dbUser?.permissions),
       },
     });
   } catch (error) {
@@ -1197,6 +1227,14 @@ usersRouter.post('/users/me/deletion-request', sensitiveActionLimiter, async (re
       return row;
     });
 
+    await logUserActivity({
+      userId: userRow.id,
+      activityType: finalize ? 'account_deactivated' : 'deletion_requested',
+      description: finalize
+        ? 'Finalized self-service account deactivation.'
+        : `Scheduled account deletion for ${scheduledFor.toLocaleDateString()}.`,
+    });
+
     if (finalize) {
       clearRefreshCookie(res);
     }
@@ -1207,7 +1245,7 @@ usersRouter.post('/users/me/deletion-request', sensitiveActionLimiter, async (re
         ? 'Account deactivated and all active sessions revoked. Personal data is scheduled for permanent purge after the retention window.'
         : `Account deletion scheduled for ${scheduledFor.toLocaleDateString()}. You may cancel anytime before then.`,
       data: {
-        user: toPublicUser(updated),
+        user: toPublicUser(updated, req.dbUser?.permissions),
         deactivated: finalize,
         deletionScheduledFor: updated.deletionScheduledFor,
       },
@@ -1239,7 +1277,7 @@ usersRouter.post('/users/me/cancel-deletion', async (req: AuthRequest, res) => {
       success: true,
       message: 'Account deletion request has been cancelled.',
       data: {
-        user: toPublicUser(updated),
+        user: toPublicUser(updated, req.dbUser?.permissions),
       },
     });
   } catch (error) {
@@ -1247,3 +1285,251 @@ usersRouter.post('/users/me/cancel-deletion', async (req: AuthRequest, res) => {
     return res.status(500).json({ success: false, message: 'Failed to cancel deletion request.' });
   }
 });
+
+// GET /api/v1/users/me/assets (strictly scoped to caller's own assets and exports)
+usersRouter.get('/users/me/assets', async (req: AuthRequest, res) => {
+  try {
+    const userId = req.dbUser!.id;
+    const assetTypeFilter =
+      typeof req.query.assetType === 'string' ? req.query.assetType.trim() : 'all';
+
+    const assetConditions = [eq(assets.userId, userId)];
+    if (assetTypeFilter && assetTypeFilter !== 'all') {
+      assetConditions.push(eq(assets.assetType, assetTypeFilter));
+    }
+
+    const [assetRows, exportRows] = await Promise.all([
+      db
+        .select({
+          id: assets.id,
+          projectId: assets.projectId,
+          projectTitle: projects.title,
+          sceneId: assets.sceneId,
+          assetType: assets.assetType,
+          mimeType: assets.mimeType,
+          storageKey: assets.storageKey,
+          fileName: assets.fileName,
+          fileSizeBytes: assets.fileSizeBytes,
+          width: assets.width,
+          height: assets.height,
+          durationSec: assets.durationSec,
+          provider: assets.provider,
+          model: assets.model,
+          promptUsed: assets.promptUsed,
+          isAccepted: assets.isAccepted,
+          createdAt: assets.createdAt,
+        })
+        .from(assets)
+        .leftJoin(projects, eq(assets.projectId, projects.id))
+        .where(and(...assetConditions))
+        .orderBy(desc(assets.createdAt))
+        .limit(120),
+      db
+        .select({
+          id: exportsTable.id,
+          projectId: exportsTable.projectId,
+          projectTitle: projects.title,
+          title: exportsTable.title,
+          format: exportsTable.format,
+          resolution: exportsTable.resolution,
+          totalDurationSec: exportsTable.totalDurationSec,
+          storageKey: exportsTable.storageKey,
+          fileSizeBytes: exportsTable.fileSizeBytes,
+          status: exportsTable.status,
+          createdAt: exportsTable.createdAt,
+        })
+        .from(exportsTable)
+        .leftJoin(projects, eq(exportsTable.projectId, projects.id))
+        .where(eq(exportsTable.userId, userId))
+        .orderBy(desc(exportsTable.createdAt))
+        .limit(60),
+    ]);
+
+    const enrichedAssets = assetRows.map((a) => ({
+      ...a,
+      signedUrl: createSignedMediaUrl(a.storageKey),
+      downloadUrl: `${createSignedMediaUrl(a.storageKey)}&download=1`,
+    }));
+
+    const enrichedExports = exportRows.map((e) => ({
+      ...e,
+      previewUrl: e.storageKey ? createSignedMediaUrl(e.storageKey) : null,
+      downloadUrl: e.storageKey ? `${createSignedMediaUrl(e.storageKey)}&download=1` : null,
+    }));
+
+    const totalStorageBytes =
+      assetRows.reduce((sum, r) => sum + (r.fileSizeBytes || 0), 0) +
+      exportRows.reduce((sum, r) => sum + (r.fileSizeBytes || 0), 0);
+
+    return res.json({
+      success: true,
+      data: {
+        assets: enrichedAssets,
+        exports: enrichedExports,
+        summary: {
+          assetCount: enrichedAssets.length,
+          exportCount: enrichedExports.length,
+          totalStorageBytes,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Get /users/me/assets error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load your media assets.' });
+  }
+});
+
+// GET /api/v1/users/me/usage (strictly scoped to caller's own projects, AI history, and credits)
+usersRouter.get('/users/me/usage', async (req: AuthRequest, res) => {
+  try {
+    const userId = req.dbUser!.id;
+    const [
+      projCountRows,
+      scriptCountRows,
+      sceneCountRows,
+      assetCountRows,
+      exportCountRows,
+      actionRows,
+      jobRows,
+      billingRows,
+      mediaBreakdownRows,
+    ] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(projects).where(eq(projects.userId, userId)),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(scriptRevisions)
+        .innerJoin(projects, eq(scriptRevisions.projectId, projects.id))
+        .where(eq(projects.userId, userId)),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(scenes)
+        .innerJoin(projects, eq(scenes.projectId, projects.id))
+        .where(eq(projects.userId, userId)),
+      db.select({ count: sql<number>`count(*)::int` }).from(assets).where(eq(assets.userId, userId)),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(exportsTable)
+        .where(eq(exportsTable.userId, userId)),
+      db
+        .select({
+          id: generationActions.id,
+          projectId: generationActions.projectId,
+          projectTitle: projects.title,
+          sceneId: generationActions.sceneId,
+          actionType: generationActions.actionType,
+          mediaType: generationActions.mediaType,
+          provider: generationActions.provider,
+          model: generationActions.model,
+          prompt: generationActions.prompt,
+          status: generationActions.status,
+          createdAt: generationActions.createdAt,
+        })
+        .from(generationActions)
+        .leftJoin(projects, eq(generationActions.projectId, projects.id))
+        .where(eq(generationActions.userId, userId))
+        .orderBy(desc(generationActions.createdAt))
+        .limit(80),
+      db
+        .select({
+          id: generationJobs.id,
+          actionId: generationJobs.actionId,
+          status: generationJobs.status,
+          progress: generationJobs.progress,
+          errorMessage: generationJobs.errorMessage,
+          attemptCount: generationJobs.attemptCount,
+          completedAt: generationJobs.completedAt,
+        })
+        .from(generationJobs)
+        .where(eq(generationJobs.userId, userId))
+        .orderBy(desc(generationJobs.createdAt))
+        .limit(80),
+      db
+        .select({
+          id: billingTransactions.id,
+          actionId: billingTransactions.actionId,
+          provider: billingTransactions.provider,
+          model: billingTransactions.model,
+          mediaType: billingTransactions.mediaType,
+          usageUnits: billingTransactions.usageUnits,
+          estimatedCredits: billingTransactions.estimatedCredits,
+          actualCredits: billingTransactions.actualCredits,
+          status: billingTransactions.status,
+          createdAt: billingTransactions.createdAt,
+        })
+        .from(billingTransactions)
+        .where(eq(billingTransactions.userId, userId))
+        .orderBy(desc(billingTransactions.createdAt))
+        .limit(80),
+      db
+        .select({
+          mediaType: generationActions.mediaType,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(generationActions)
+        .where(eq(generationActions.userId, userId))
+        .groupBy(generationActions.mediaType),
+    ]);
+
+    const jobByActionId = new Map(jobRows.map((j) => [j.actionId, j]));
+    const billingByActionId = new Map(billingRows.map((b) => [b.actionId, b]));
+
+    const history = actionRows.map((act) => ({
+      ...act,
+      job: jobByActionId.get(act.id) ?? null,
+      billing: billingByActionId.get(act.id) ?? null,
+    }));
+
+    const creditsSettled = billingRows
+      .filter((b) => b.status === 'settled')
+      .reduce((sum, b) => sum + (b.actualCredits ?? b.estimatedCredits), 0);
+    const creditsReserved = billingRows
+      .filter((b) => b.status === 'reserved')
+      .reduce((sum, b) => sum + b.estimatedCredits, 0);
+    const creditsRefunded = billingRows
+      .filter((b) => b.status === 'refunded')
+      .reduce((sum, b) => sum + b.estimatedCredits, 0);
+
+    return res.json({
+      success: true,
+      data: {
+        creditsBalance: req.dbUser!.creditsBalance,
+        creditsSettled,
+        creditsReserved,
+        creditsRefunded,
+        counts: {
+          projects: projCountRows[0]?.count ?? 0,
+          scripts: scriptCountRows[0]?.count ?? 0,
+          scenes: sceneCountRows[0]?.count ?? 0,
+          assets: assetCountRows[0]?.count ?? 0,
+          exports: exportCountRows[0]?.count ?? 0,
+          generations: actionRows.length,
+        },
+        mediaBreakdown: mediaBreakdownRows,
+        history,
+        transactions: billingRows,
+      },
+    });
+  } catch (error) {
+    console.error('Get /users/me/usage error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load usage metrics.' });
+  }
+});
+
+// GET /api/v1/users/me/activity (strictly caller's own activity feed)
+usersRouter.get('/users/me/activity', async (req: AuthRequest, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+    const rows = await db
+      .select()
+      .from(userActivities)
+      .where(eq(userActivities.userId, req.dbUser!.id))
+      .orderBy(desc(userActivities.createdAt))
+      .limit(limit);
+
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Get /users/me/activity error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load activity history.' });
+  }
+});
+

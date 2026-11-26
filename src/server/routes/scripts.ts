@@ -8,6 +8,7 @@ import { AIProviderError } from '../ai/exceptions.ts';
 import { extractAndSaveScenes } from '../ai/services/sceneExtractionService.ts';
 import { generateAndSaveScriptRevision } from '../ai/services/scriptGenerationService.ts';
 import { improveAndSaveScriptRevision } from '../ai/services/scriptImprovementService.ts';
+import { logUserActivity } from '../services/activityService.ts';
 
 export const scriptsRouter = Router();
 scriptsRouter.use(requireAuth);
@@ -77,6 +78,13 @@ scriptsRouter.post('/projects/:projectId/scripts', async (req: AuthRequest, res)
         .where(eq(projects.id, project.id));
 
       return rev;
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_saved',
+      description: `Saved script revision v${created.versionNumber} for "${project.title}".`,
+      relatedProjectId: project.id,
     });
 
     res.status(201).json({
@@ -170,6 +178,14 @@ scriptsRouter.post('/projects/:projectId/scripts/generate', async (req: AuthRequ
       ...parsed.data,
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_generated',
+      description: `Generated script revision v${result.revision.versionNumber} using ${result.provider}.`,
+      relatedProjectId: project.id,
+      metadata: { provider: result.provider, isMock: result.isMock },
+    });
+
     res.status(201).json({
       success: true,
       message: `Generated script revision v${result.revision.versionNumber}`,
@@ -234,6 +250,14 @@ scriptsRouter.post('/projects/:projectId/scripts/revise', async (req: AuthReques
       projectId: project.id,
       userUid: req.dbUser!.uid,
       ...parsed.data,
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_improved',
+      description: `Improved script (${parsed.data.action}) as revision v${result.revision.versionNumber}.`,
+      relatedProjectId: project.id,
+      metadata: { action: parsed.data.action, provider: result.provider },
     });
 
     res.status(201).json({
@@ -309,6 +333,13 @@ scriptsRouter.post('/projects/:projectId/scripts/:revisionId/restore', async (re
       return rev;
     });
 
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'script_restored',
+      description: `Restored script v${oldRev.versionNumber} as v${restored.versionNumber}.`,
+      relatedProjectId: project.id,
+    });
+
     res.status(201).json({
       success: true,
       message: `Restored v${oldRev.versionNumber} as new revision v${restored.versionNumber}`,
@@ -346,6 +377,14 @@ scriptsRouter.post('/projects/:projectId/scripts/extract-scenes', async (req: Au
       content: parsed.data.content,
       replaceExisting: parsed.data.replaceExisting,
       provider: parsed.data.provider,
+    });
+
+    await logUserActivity({
+      userId: req.dbUser!.id,
+      activityType: 'scenes_extracted',
+      description: `Extracted ${result.scenes.length} storyboard scenes for "${project.title}".`,
+      relatedProjectId: project.id,
+      metadata: { sceneCount: result.scenes.length, provider: result.provider },
     });
 
     res.status(201).json({

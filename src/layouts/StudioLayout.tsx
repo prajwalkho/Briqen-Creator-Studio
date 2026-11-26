@@ -2,19 +2,28 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   AudioWaveform,
+  BarChart3,
   ChevronDown,
+  Crown,
   Film,
   FolderKanban,
+  Images,
   KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
   Moon,
   Settings,
+  Shield,
   Sun,
   User as UserIcon,
   X,
 } from 'lucide-react';
+import {
+  hasAdminPanelAccess,
+  isSuperAdminClient,
+  normalizeClientRole,
+} from '../components/ProtectedRoute';
 import { useAuth } from '../context/AuthContext';
 
 interface StudioLayoutProps {
@@ -58,11 +67,25 @@ export const StudioLayout: React.FC<StudioLayoutProps> = ({
     };
   }, [menuOpen]);
 
+  const isOwnerUser = isSuperAdminClient(profile?.role);
+  const isAdminUser = hasAdminPanelAccess(profile?.role);
+  const canonicalRole = normalizeClientRole(profile?.role);
+  const roleLabel =
+    canonicalRole === 'super_admin'
+      ? 'Super Admin (Owner)'
+      : canonicalRole === 'admin'
+      ? 'Admin'
+      : 'Creator';
+
   const navItems = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/projects', label: 'Projects', icon: FolderKanban },
+    { to: '/my-assets', label: 'My Assets', icon: Images },
+    { to: '/my-usage', label: 'My Usage & Credits', icon: BarChart3 },
     { to: '/studio-lab', label: 'Audio & Analysis', icon: AudioWaveform },
     { to: '/settings', label: 'Account Settings', icon: Settings },
+    ...(isAdminUser ? [{ to: '/admin', label: 'Admin Panel', icon: Shield }] : []),
+    ...(isOwnerUser ? [{ to: '/owner', label: 'Owner Console', icon: Crown }] : []),
   ];
 
   const isActive = (path: string) => {
@@ -250,6 +273,9 @@ export const StudioLayout: React.FC<StudioLayoutProps> = ({
                       <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
                         {profile?.email || ''}
                       </p>
+                      <p className="text-[11px] font-mono text-amber-700 dark:text-amber-400 mt-0.5">
+                        {roleLabel}
+                      </p>
                     </div>
                   </div>
 
@@ -292,6 +318,36 @@ export const StudioLayout: React.FC<StudioLayoutProps> = ({
                       <KeyRound className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                       <span>Change Password</span>
                     </button>
+
+                    {isOwnerUser && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          navigate('/owner');
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-semibold text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 transition-colors text-left"
+                      >
+                        <Crown className="h-3.5 w-3.5 shrink-0" />
+                        <span>Owner Console</span>
+                      </button>
+                    )}
+
+                    {isAdminUser && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          navigate('/admin');
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium text-sky-700 dark:text-sky-400 hover:bg-sky-500/10 transition-colors text-left"
+                      >
+                        <Shield className="h-3.5 w-3.5 shrink-0" />
+                        <span>Admin Panel</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="pt-1.5 px-1.5 border-t border-slate-100 dark:border-slate-800/80">
